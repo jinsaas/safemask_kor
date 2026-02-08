@@ -152,11 +152,11 @@ def blur_tensor(mask_tensor, k=5):
     
 _counter = 0  # 전역 카운터
 
-def resolve_filename(prefix: str) -> str:
-    global _counter
-    _counter += 1
-    filename = prefix.replace("%number", str(_counter))
-    return filename
+def resolve_filename(prefix: str, save_dir: str) -> str:
+    base = prefix.replace("%number", "")
+    existing = [f for f in os.listdir(save_dir) if f.startswith(base)]
+    number = len(existing) + 1
+    return prefix.replace("%number", str(number))
 
 
 #--------------------------
@@ -1281,30 +1281,30 @@ class SafeMaskSaveOnly:
             mask = torch.from_numpy(np.array(mask))
 
         # 차원 보정
-        if mask.ndim == 2:          # (H,W)
+        if mask.ndim == 2:
             mask_img = mask.cpu().numpy()
-        elif mask.ndim == 3:        # (B,H,W)
+        elif mask.ndim == 3:
             mask_img = mask[0].cpu().numpy()
-        elif mask.ndim == 4:        # (B,C,H,W) → 첫 배치/첫 채널
+        elif mask.ndim == 4:
             mask_img = mask[0,0].cpu().numpy()
         else:
             raise ValueError(f"Unexpected mask shape: {mask.shape}")
 
         mask_img = mask_img.squeeze()
-
+        
         # 저장 경로 준비
         output_dir = os.path.join(folder_paths.get_output_directory(), "mask")
         os.makedirs(output_dir, exist_ok=True)
-        
+
         # %number 치환 적용
-        filename = resolve_filename(filename_prefix) + ".png"
+        filename = resolve_filename(filename_prefix, output_dir) + ".png"
         filepath = os.path.join(output_dir, filename)
-
-
+        
         # 저장 (0~1 범위 → 0~255 변환)
         imageio.imwrite(filepath, (mask_img * 255).astype("uint8"))
-
         return {}
+
+
 
 
 
@@ -1333,34 +1333,34 @@ class SafeMaskSaveLink:
     def execute(cls, mask, filename_prefix="mask_%number", save_switch="off"):
         # 출력 연결용 텐서
         mask_tensor = mask if isinstance(mask, torch.Tensor) else torch.from_numpy(np.array(mask))
-
+        
         # 저장 여부 확인
         if save_switch == "on":
             # 저장용 이미지 → 항상 2D로 변환
-            if mask_tensor.ndim == 4:   # (B,C,H,W)
+            if mask_tensor.ndim == 4:
                 mask_img = mask_tensor[0,0].cpu().numpy()
-            elif mask_tensor.ndim == 3: # (B,H,W) 또는 (C,H,W)
+            elif mask_tensor.ndim == 3:
                 mask_img = mask_tensor[0].cpu().numpy()
-            elif mask_tensor.ndim == 2: # (H,W)
+            elif mask_tensor.ndim == 2:
                 mask_img = mask_tensor.cpu().numpy()
             else:
                 raise ValueError(f"Unexpected mask shape: {mask_tensor.shape}")
 
             mask_img = mask_img.squeeze()
-
+            
             # 저장 경로 준비
             output_dir = os.path.join(folder_paths.get_output_directory(), "mask")
             os.makedirs(output_dir, exist_ok=True)
 
             # %number 치환 적용
-            filename = resolve_filename(filename_prefix) + ".png"
+            filename = resolve_filename(filename_prefix, output_dir) + ".png"
             filepath = os.path.join(output_dir, filename)
-
             # 저장 (0~1 범위 → 0~255)
             imageio.imwrite(filepath, (mask_img * 255).astype("uint8"))
-
+            
         # 출력 연결
         return (mask_tensor,)
+
 
 
 
