@@ -150,6 +150,13 @@ def blur_tensor(mask_tensor, k=5):
     """
     return F.avg_pool2d(mask_tensor, kernel_size=k, stride=1, padding=k//2)
     
+_counter = 0  # 전역 카운터
+
+def resolve_filename(prefix: str) -> str:
+    global _counter
+    _counter += 1
+    filename = prefix.replace("%number", str(_counter))
+    return filename
 
 
 #--------------------------
@@ -1263,12 +1270,12 @@ class SafeMaskSaveOnly:
         return {
             "required": {
                 "mask": ("MASK", {"tooltip": "저장할 마스크 텐서"}),
-                "filename_prefix": ("STRING", {"default": "mask", "tooltip": "저장할 파일 이름 접두사"}),
+                "filename_prefix": ("STRING", {"default": "mask_%number", "tooltip": "저장할 파일 이름 접두사"}),
             }
         }
 
     @classmethod
-    def execute(cls, mask, filename_prefix="mask"):
+    def execute(cls, mask, filename_prefix="mask_%number"):
         # 입력 타입 정리
         if not isinstance(mask, torch.Tensor):
             mask = torch.from_numpy(np.array(mask))
@@ -1288,7 +1295,11 @@ class SafeMaskSaveOnly:
         # 저장 경로 준비
         output_dir = os.path.join(folder_paths.get_output_directory(), "mask")
         os.makedirs(output_dir, exist_ok=True)
-        filepath = os.path.join(output_dir, f"{filename_prefix}.png")
+        
+        # %number 치환 적용
+        filename = resolve_filename(filename_prefix) + ".png"
+        filepath = os.path.join(output_dir, filename)
+
 
         # 저장 (0~1 범위 → 0~255 변환)
         imageio.imwrite(filepath, (mask_img * 255).astype("uint8"))
@@ -1313,34 +1324,44 @@ class SafeMaskSaveLink:
         return {
             "required": {
                 "mask": ("MASK", {"tooltip": "저장할 마스크 텐서"}),
-                "filename_prefix": ("STRING", {"default": "mask", "tooltip": "저장할 파일 이름 접두사"}),
+                "filename_prefix": ("STRING", {"default": "mask_%number", "tooltip": "저장할 파일 이름 접두사"}),
+                "save_switch": ("COMBO", {"options": ["off", "on"], "default": "off", "tooltip": "저장 여부(off/on)"})
             }
         }
 
     @classmethod
-    def execute(cls, mask, filename_prefix="mask"):
-        # 입력 타입 정리
-        if isinstance(mask, torch.Tensor):
-            mask_tensor = mask
-        else:
-            mask_tensor = torch.from_numpy(np.array(mask))
+    def execute(cls, mask, filename_prefix="mask_%number", save_switch="off"):
+        # 출력 연결용 텐서
+        mask_tensor = mask if isinstance(mask, torch.Tensor) else torch.from_numpy(np.array(mask))
 
-        # 차원 보정
-        if mask.ndim == 2:          # (H,W)
-            mask_img = mask.cpu().numpy()
-        elif mask.ndim == 3:        # (B,H,W)
-            mask_img = mask[0].cpu().numpy()
-        elif mask.ndim == 4:        # (B,C,H,W) → 첫 배치/첫 채널
-            mask_img = mask[0,0].cpu().numpy()
-        else:
-            raise ValueError(f"Unexpected mask shape: {mask.shape}")
+        # 저장 여부 확인
+        if save_switch == "on":
+            # 저장용 이미지 → 항상 2D로 변환
+            if mask_tensor.ndim == 4:   # (B,C,H,W)
+                mask_img = mask_tensor[0,0].cpu().numpy()
+            elif mask_tensor.ndim == 3: # (B,H,W) 또는 (C,H,W)
+                mask_img = mask_tensor[0].cpu().numpy()
+            elif mask_tensor.ndim == 2: # (H,W)
+                mask_img = mask_tensor.cpu().numpy()
+            else:
+                raise ValueError(f"Unexpected mask shape: {mask_tensor.shape}")
 
-        mask_img = mask[0].cpu().numpy().squeeze()
-        output_dir = os.path.join(folder_paths.get_output_directory(), "mask")
-        os.makedirs(output_dir, exist_ok=True)
-        filepath = os.path.join(output_dir, f"{filename_prefix}.png")
-        imageio.imwrite(filepath, (mask_img * 255).astype("uint8"))
-        return (mask,)
+            mask_img = mask_img.squeeze()
+
+            # 저장 경로 준비
+            output_dir = os.path.join(folder_paths.get_output_directory(), "mask")
+            os.makedirs(output_dir, exist_ok=True)
+
+            # %number 치환 적용
+            filename = resolve_filename(filename_prefix) + ".png"
+            filepath = os.path.join(output_dir, filename)
+
+            # 저장 (0~1 범위 → 0~255)
+            imageio.imwrite(filepath, (mask_img * 255).astype("uint8"))
+
+        # 출력 연결
+        return (mask_tensor,)
+
 
 
 class SafeMaskChecker:
