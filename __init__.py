@@ -1,6 +1,6 @@
 import os, logging, nodes
 
-version = "3.0.0"
+version = "3.0.2"
 logging.info(f"### Loading: ComfyUI_SafeMask_Pack (v{version})")
 
 # 노드 정의 임포트
@@ -83,4 +83,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SafeMaskSaveLink": "안정화 마스크 저장&링크",
     "SafeMaskChecker": "안정화 마스크 체커",
     "SafeMaskCheckerDiff": "안정화 마스크 강조 체커",
+
 }
