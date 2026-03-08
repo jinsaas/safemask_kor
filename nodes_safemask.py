@@ -13,6 +13,7 @@ import scipy.ndimage
 from PIL import Image
 from typing_extensions import override
 import folder_paths
+import math
 
 import comfy
 import comfy.utils
@@ -27,35 +28,60 @@ import logging
 #--------------------------
 # Header Utility Code(Baseif)
 #--------------------------
+def normalize_mask_tensor(mask):
+
+    if not isinstance(mask, torch.Tensor):
+        mask_tensor = torch.from_numpy(np.array(mask)).float()
+    else:
+        mask_tensor = mask.float()
+
+    if mask_tensor.ndim == 2:
+        return mask_tensor
+    elif mask_tensor.ndim == 3:
+        if mask_tensor.shape[0] == 1:
+            return mask_tensor.squeeze(0)
+        elif mask_tensor.shape[-1] == 1:
+            return mask_tensor.squeeze(-1)
+        else:
+            return mask_tensor[0]
+    elif mask_tensor.ndim == 4:
+        return mask_tensor[0, 0, :, :]
+    else:
+        raise ValueError(f"Unexpected mask shape: {mask_tensor.shape}")
+
 
 def ensure_image_tensor(arr):
     if not isinstance(arr, torch.Tensor):
         arr = torch.from_numpy(np.array(arr)).float()
-    if arr.dim() == 2:  # (H,W) → 흑백
-        arr = arr.unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
+
+    if arr.dim() == 2:
+        arr = arr.unsqueeze(0).unsqueeze(0)
+
     elif arr.dim() == 3:
-        if arr.shape[0] in (1,3):  # (H,W,C)
-            arr = arr.permute(2,0,1).unsqueeze(0)  # (1,C,H,W)
-        else:  # (B,H,W)
-            arr = arr.unsqueeze(1)  # (B,1,H,W)
-    elif arr.dim() == 4:  # (B,C,H,W)
-        pass
+        if arr.shape[-1] in (1,3,4):
+            arr = arr.permute(2,0,1).unsqueeze(0)
+        else:
+            arr = arr.unsqueeze(0)
+
+    elif arr.dim() == 4:
+        if arr.shape[-1] in (1,3,4):
+            arr = arr.permute(0,3,1,2)
+
     else:
         raise ValueError(f"Unsupported image shape: {arr.shape}")
-    return arr
 
 
+    return arr.float()
 
 
 def ensure_mask_tensor(t: torch.Tensor) -> torch.Tensor:
-    """항상 (B,1,H,W) 형태로 보정"""
     if not isinstance(t, torch.Tensor):
         t = torch.from_numpy(np.array(t)).float()
-    if t.dim() == 2:          # (H,W)
+    if t.dim() == 2:
         t = t.unsqueeze(0).unsqueeze(0)
-    elif t.dim() == 3:        # (B,H,W)
+    elif t.dim() == 3:
         t = t.unsqueeze(1)
-    elif t.dim() == 4:        # (B,C,H,W)
+    elif t.dim() == 4:
         pass
     else:
         raise ValueError(f"Unsupported mask shape: {t.shape}")
@@ -63,26 +89,23 @@ def ensure_mask_tensor(t: torch.Tensor) -> torch.Tensor:
     
     
 def composite(destination, source, mask, resize_source=False):
-    # destination, source: (B,H,W,C)
-    # mask: (B,1,H,W) / (B,H,W,1) / (B,H,W,3)
 
     source = source.to(destination.device)
 
-    # 필요 시 소스를 대상 크기에 맞게 리사이즈
     if resize_source:
         source = torch.nn.functional.interpolate(
-            source.permute(0,3,1,2),  # (B,H,W,C) → (B,C,H,W)
+            source.permute(0,3,1,2),
             size=(destination.shape[1], destination.shape[2]),
             mode="bilinear"
-        ).permute(0,2,3,1)          # 다시 (B,H,W,C)
+        ).permute(0,2,3,1)
 
     source = comfy.utils.repeat_to_batch_size(source, destination.shape[0])
 
-    # --- 마스크 처리 ---
+
     mask = mask.to(destination.device, copy=True)
 
     if mask.ndim == 4 and mask.shape[1] == 1:
-        # (B,1,H,W) → (B,H,W,1)
+
         mask = torch.nn.functional.interpolate(
             mask,
             size=(source.shape[1], source.shape[2]),
@@ -92,7 +115,7 @@ def composite(destination, source, mask, resize_source=False):
         mask = mask.permute(0,2,3,1)
 
     elif mask.ndim == 4 and mask.shape[-1] == 1:
-        # (B,H,W,1)
+
         mask = torch.nn.functional.interpolate(
             mask.permute(0,3,1,2),
             size=(source.shape[1], source.shape[2]),
@@ -101,8 +124,8 @@ def composite(destination, source, mask, resize_source=False):
         mask = comfy.utils.repeat_to_batch_size(mask, source.shape[0])
 
     elif mask.ndim == 4 and mask.shape[-1] == 3:
-        # (B,H,W,3) → 그레이스케일 변환
-        mask = mask.mean(dim=-1, keepdim=True)  # (B,H,W,1)
+
+        mask = mask.mean(dim=-1, keepdim=True)
         mask = torch.nn.functional.interpolate(
             mask.permute(0,3,1,2),
             size=(source.shape[1], source.shape[2]),
@@ -113,16 +136,12 @@ def composite(destination, source, mask, resize_source=False):
     else:
         raise ValueError(f"Unexpected mask shape: {mask.shape}")
 
-    # 합성
     inverse_mask = torch.ones_like(mask) - mask
-    output = mask * source + inverse_mask * destination  # (B,H,W,C)
+    output = mask * source + inverse_mask * destination
 
     return output
 
 
-
-
-# 색상 지정 + 반투명 alpha
 COLOR_MAP = {
     "red":   (255, 0, 0, 128),
     "green": (0, 255, 0, 128),
@@ -131,26 +150,98 @@ COLOR_MAP = {
 }
 
 def get_color(name: str):
-    """문자열 키로 색상 RGBA 튜플을 반환"""
     return COLOR_MAP.get(name, COLOR_MAP["red"])
     
 def dilate_tensor(mask_tensor, kernel_size=5, iterations=1):
-    """
-    PyTorch 기반 딜레이션 (max pooling 활용)
-    mask_tensor: (B,1,H,W) float tensor
-    """
+
+    stride = 1
+
     for _ in range(iterations):
         mask_tensor = F.max_pool2d(mask_tensor, kernel_size, stride=1, padding=kernel_size//2)
     return mask_tensor
+    
+def gaussian_blur(tensor, kernel_size=5, sigma=2):
 
+    k = kernel_size // 2
+    x = torch.arange(-k, k+1, dtype=torch.float32)
+    gauss = torch.exp(-(x**2)/(2*sigma**2))
+    gauss = gauss / gauss.sum()
+    kernel1d = gauss.unsqueeze(0)
+    kernel2d = gauss.unsqueeze(0) @ gauss.unsqueeze(1)
+    kernel2d = kernel2d / kernel2d.sum()
+    kernel2d = kernel2d.unsqueeze(0).unsqueeze(0)
+
+    blurred = F.conv2d(tensor, kernel2d, padding=k)
+    return blurred
+
+
+def dilate_mtensor(mask_tensor, kernel_size=5, sigma=2, iterations=1, tapered_corners=True):
+    if tapered_corners:
+        for _ in range(iterations):
+            blurred = gaussian_blur(mask_tensor, kernel_size=kernel_size, sigma=sigma)
+            mask_tensor = (blurred > 0.3).float()
+    else:
+        stride=1
+        for _ in range(iterations):
+            mask_tensor = F.max_pool2d(mask_tensor, kernel_size, stride=1, padding=kernel_size//2)
+    return mask_tensor
+
+
+
+def erode_mtensor(mask_tensor, kernel_size=5, sigma=2, iterations=1, tapered_corners=True):
+    inv = 1.0 - mask_tensor
+    if tapered_corners:
+        for _ in range(iterations):
+            blurred = gaussian_blur(inv, kernel_size=kernel_size, sigma=sigma)
+            inv = (blurred > 0.3).float()
+    else:
+        stride=1
+        for _ in range(iterations):
+            inv = F.max_pool2d(inv, kernel_size, stride=1, padding=kernel_size//2)
+    return 1.0 - inv
+
+
+
+def squeeze_mask_output(mask_tensor: torch.Tensor) -> torch.Tensor:
+
+    if mask_tensor.ndim == 4 and mask_tensor.shape[1] == 1:
+        return mask_tensor.squeeze(1)
+    return mask_tensor
+
+def apply_feathering(canvas: torch.Tensor, pad_top: int, pad_bottom: int, pad_left: int, pad_right: int, feather_strength: float) -> torch.Tensor:
+
+    if feather_strength <= 0.0:
+        return canvas
+
+    b, c, h, w = canvas.shape
+    mask = torch.ones((b, 1, h, w), dtype=canvas.dtype, device=canvas.device)
+
+    if pad_top > 0:
+        grad = torch.linspace(0, 1, steps=pad_top, device=canvas.device).view(1, 1, -1, 1)
+        mask[:, :, :pad_top, :] *= grad
+
+    if pad_bottom > 0:
+        grad = torch.linspace(1, 0, steps=pad_bottom, device=canvas.device).view(1, 1, -1, 1)
+        mask[:, :, -pad_bottom:, :] *= grad
+
+    if pad_left > 0:
+        grad = torch.linspace(0, 1, steps=pad_left, device=canvas.device).view(1, 1, 1, -1)
+        mask[:, :, :, :pad_left] *= grad
+
+    if pad_right > 0:
+        grad = torch.linspace(1, 0, steps=pad_right, device=canvas.device).view(1, 1, 1, -1)
+        mask[:, :, :, -pad_right:] *= grad
+
+    mask = mask.clamp(0, 1) ** (1.0 / (1.0 + feather_strength))
+
+    canvas = canvas * mask + canvas * (1 - mask) * 0.5
+    return canvas
+    
 def blur_tensor(mask_tensor, k=5):
-    """
-    PyTorch 기반 블러 (avg pooling으로 근사)
-    mask_tensor: (B,1,H,W) float tensor
-    """
+
     return F.avg_pool2d(mask_tensor, kernel_size=k, stride=1, padding=k//2)
     
-_counter = 0  # 전역 카운터
+_counter = 0
 
 def resolve_filename(prefix: str, save_dir: str) -> str:
     base = prefix.replace("%number", "")
@@ -159,9 +250,9 @@ def resolve_filename(prefix: str, save_dir: str) -> str:
     return prefix.replace("%number", str(number))
 
 
-#--------------------------
+#----------------------------------------------------
 # Mask Node Code(Base)
-#--------------------------
+#----------------------------------------------------
 
 class SafeMaskToImage:
     classname = "SafeMaskToImage"
@@ -182,41 +273,20 @@ class SafeMaskToImage:
 
     @classmethod
     def execute(cls, mask):
-        if not isinstance(mask, torch.Tensor):
-            mask = torch.from_numpy(np.array(mask)).float()
+        mask_tensor = normalize_mask_tensor(mask)
 
-        if mask.ndim == 2:          # (H,W)
-            result = mask.unsqueeze(-1)   # (H,W,1)
-        elif mask.ndim == 3:        # (B,H,W)
-            if mask.shape[0] == 1:
-                result = mask.squeeze(0).unsqueeze(-1) # (H,W,1)
-            else:
-                raise ValueError("Batch dimension >1 not supported for SafeMaskToImage")
-        elif mask.ndim == 4:        # (B,H,W,C)
-            if mask.shape[0] == 1:
-                result = mask.squeeze(0)            # (H,W,C)
-            else:
-                raise ValueError("Batch dimension >1 not supported for SafeMaskToImage")
+        if mask_tensor.max() > 1.0:
+            mask_tensor = mask_tensor / 255.0
         else:
-            raise ValueError(f"Unsupported mask ndim={mask.ndim}")
-                    
-        # 값 범위 정규화
-        if result.max() > 1.0:
-            result = result / 255.0
-        else:
-            result = result.clamp(0, 1)
-            
-        if result.shape[-1] == 1:
+            mask_tensor = mask_tensor.clamp(0, 1)
 
-            # (H,W,1) → (H,W,3)
-            result = result.expand(-1, -1, 3)            # (H,W,3)
-            
-        result = result.unsqueeze(0)           # (1,H,W,3)
+        result = mask_tensor.unsqueeze(-1).expand(-1, -1, 3)
 
+        result = result.unsqueeze(0)
 
         return (result,)
 
-
+#----------------------------------------------------
 
 class SafeImageToMask:
     classname = "SafeImageToMask"
@@ -241,46 +311,35 @@ class SafeImageToMask:
     def execute(cls, image, channel):
         channels = ["red", "green", "blue", "alpha"]
         idx = channels.index(channel)
-        # numpy → torch 변환
-        if not isinstance(image, torch.Tensor):
-            image = torch.from_numpy(image).float()
-
-        # ndim 보정
-        if image.ndim == 2:
-            # H, W → (1, H, W, 1)
-            image = image.unsqueeze(0).unsqueeze(-1)
-        elif image.ndim == 3:
-            # H, W, C → (1, H, W, C)
-            image = image.unsqueeze(0)
-        elif image.ndim == 4:
-            # B, H, W, C → 그대로 사용
-            pass
+        print(">>> type(image):", type(image))
+        if isinstance(image, torch.Tensor):
+            print(">>> image.shape:", image.shape)
+        elif isinstance(image, np.ndarray):
+            print(">>> image.shape:", image.shape)
         else:
-            raise ValueError(f"Unsupported image ndim={image.ndim}")
-                    
-        # 값 범위 정규화
+            print(">>> image:", image)
+
+
+        image = ensure_image_tensor(image)
+
         if image.max() > 1.0:
             image = image / 255.0
         else:
             image = image.clamp(0, 1)
-            
-        if idx >= image.shape[-1]:
-            if channel == "alpha":
-                mask = torch.ones(
-                    (image.shape[0], image.shape[1], image.shape[2]),
-                    dtype=torch.float32,
-                    device=image.device,
-                )
-            else:
-                raise ValueError(f"Channel '{channel}' not available in image with {image.shape[-1]} channels")
-        else:
-            mask = image[:, :, :, idx]
-        
-        # 결과를 항상 ndim=3 (H, W, C)로 반환
-        result = mask.squeeze(0)  # 배치 제거 → (H, W, 1)
 
+        if idx >= image.shape[1]:
+            if channel == "alpha":
+                mask = torch.ones((image.shape[2], image.shape[3]), dtype=torch.float32, device=image.device)
+            else:
+                raise ValueError(f"Channel '{channel}' not available in image with {image.shape[1]} channels")
+        else:
+            mask = image[0, idx, :, :] 
+            
+        mask = squeeze_mask_output(mask) 
+        
         return (mask,)
 
+#----------------------------------------------------
 
 class SafeImageColorToMask:
     classname = "SafeImageColorToMask"
@@ -312,27 +371,13 @@ class SafeImageColorToMask:
                 red="off", green="off", blue="off",
                 yellow="off", magenta="off", cyan="off", black="off"):
 
-        # numpy → torch 변환
-        if not isinstance(image, torch.Tensor):
-            image = torch.from_numpy(image).float()
+        image = ensure_image_tensor(image)
 
-        # ndim 보정
-        if image.ndim == 2:
-            image = image.unsqueeze(0).unsqueeze(-1)
-        elif image.ndim == 3:
-            image = image.unsqueeze(0)
-        elif image.ndim == 4:
-            pass
-        else:
-            raise ValueError(f"Unsupported image ndim={image.ndim}")
-
-        # (B,H,W,C) → 0~255 int
         temp = (torch.clamp(image, 0, 1.0) * 255.0).round().to(torch.int)
-        R, G, B = temp[:, :, :, 0].float(), temp[:, :, :, 1].float(), temp[:, :, :, 2].float()
+        R, G, B = temp[:, 0, :, :].float(), temp[:, 1, :, :].float(), temp[:, 2, :, :].float()
 
         mask = torch.zeros_like(R, dtype=torch.float)
 
-        # 비율 기반 색상 판별
         if red == "on":
             cond_red = (R > G + 10) & (R > B + 10)
             mask = torch.max(mask, cond_red.float())
@@ -361,7 +406,6 @@ class SafeImageColorToMask:
             cond_black = (R < 20) & (G < 20) & (B < 20)
             mask = torch.max(mask, cond_black.float())
 
-        # 최종 (B,H,W,)
         mask = mask.squeeze(0)
 
         return (mask,)
@@ -371,9 +415,9 @@ class SafeImageColorToMask:
 
 
 
-#--------------------------
+#----------------------------------------------------
 # Mask Node Code(Edit)
-#--------------------------
+#----------------------------------------------------
 
 class SafeImageComposite:
     classname = "SafeImageComposite"
@@ -403,14 +447,12 @@ class SafeImageComposite:
 
     @classmethod
     def execute(cls, destination, source, mask, resize_source="off", blend_mode="normal", spread_mode=0):
-        # destination/source → (B,C,H,W)
-        destination = ensure_image_tensor(destination)
-        source      = ensure_image_tensor(source)
+        destination = ensure_image_tensor(destination).permute(0,2,3,1)
+        source      = ensure_image_tensor(source).permute(0,2,3,1)
 
-        # mask 보정 → (B,1,H,W)
+
         mask = ensure_mask_tensor(mask)
 
-        # spread_mode 적용
         kernel_map = {i: (2*i-1) for i in range(1,11)}
         kernel_size = kernel_map.get(spread_mode, 0)
         if kernel_size > 0:
@@ -421,21 +463,16 @@ class SafeImageComposite:
 
         mask = mask.permute(0,2,3,1)
 
-        # RGB 확장 → (B,H,W,3)
         mask_rgb = mask.repeat(1,1,1,3)
 
-        # 좌표 범위 맞추기
-        H, W = destination.shape[2], destination.shape[3]  # BCHW
+        H, W = destination.shape[2], destination.shape[3]
         source = source[:, :, :H, :W]
         mask   = mask_rgb[:, :, :H, :W]
 
-        # 알파 채널 보정
         destination, source = node_helpers.image_alpha_fix(destination, source)
 
-        # 합성
         dest_out = composite(destination, source, mask, resize_source == "on")
 
-        # 블렌드 모드
         if blend_mode == "soft":
             output = destination * (1 - mask) + dest_out * mask
         elif blend_mode == "darken":
@@ -447,14 +484,12 @@ class SafeImageComposite:
         else:
             output = dest_out
 
-        # 채널이 1개라면 RGB로 확장
         if output.shape[-1] == 1:
             output = output.repeat(1,1,1,3)
 
         return (output,)
 
-
-
+#----------------------------------------------------
     
 class SafeMaskComposite:
     classname = "SafeMaskComposite"
@@ -486,13 +521,11 @@ class SafeMaskComposite:
         destination = ensure_mask_tensor(destination)
         source      = ensure_mask_tensor(source)
 
-        # 크기 맞추기
         H = min(destination.shape[-2], source.shape[-2])
         W = min(destination.shape[-1], source.shape[-1])
         destination = destination[:, :, :H, :W]
         source      = source[:, :, :H, :W]
 
-        # spread 적용
         kernel_map = {i: (2*i-1) for i in range(1,11)}
         kernel_size = kernel_map.get(spread, 0)
         if kernel_size > 0:
@@ -501,7 +534,6 @@ class SafeMaskComposite:
             destination = torch.nn.functional.conv2d(destination, kernel, padding=pad)
             destination = destination / (kernel_size * kernel_size)
 
-        # 결합 방식
         if operation == "multiply":
             combined = destination * source
         elif operation == "add":
@@ -517,7 +549,6 @@ class SafeMaskComposite:
         else:
             combined = source
 
-        # 블렌드 모드
         if blend_mode == "soft":
             output = (destination * 0.5 + source * 0.5)
         elif blend_mode == "screen":
@@ -542,9 +573,9 @@ class SafeMaskComposite:
 
     
 
-#--------------------------
+#----------------------------------------------------
 # Mask Node Code(Transform)
-#--------------------------
+#----------------------------------------------------
 
 class SafeInvertMask:
     classname = "SafeInvertMask"
@@ -565,23 +596,14 @@ class SafeInvertMask:
 
     @classmethod
     def execute(cls, mask):
-        if not isinstance(mask, torch.Tensor):
-            mask = torch.tensor(mask, dtype=torch.float32)
-
-        if mask.ndim == 2:          # (H,W) → (1,H,W)
-            mask = mask.unsqueeze(0)
-        elif mask.ndim == 3:        # (B,H,W)
-            pass
-        elif mask.ndim == 4:        # (B,C,H,W)
-            mask = mask[:,0,:,:]
-
-        elif mask.ndim != 3:        # (B,H,W)만 허용
-            raise ValueError(f"Unsupported mask shape: {mask.shape}")
+        mask = ensure_mask_tensor(mask)
 
         out = 1.0 - mask
         out = torch.clamp(out, 0.0, 1.0)
 
         return (out,)
+
+#----------------------------------------------------
 
 class SafeGrowMask:
     classname    = "SafeGrowMask"
@@ -604,47 +626,18 @@ class SafeGrowMask:
 
     @classmethod
     def execute(cls, mask, expand, tapered_corners):
-        # 입력 타입 정리
-        if not isinstance(mask, torch.Tensor):
-            mask_tensor = torch.from_numpy(np.array(mask))
-        else:
-            mask_tensor = mask
+        
+        mask = ensure_mask_tensor(mask)
+        
+        if expand > 0:
+            mask = dilate_mtensor(mask, kernel_size=3, iterations=expand, tapered_corners=tapered_corners)
 
-        # 차원 정규화
-        if mask_tensor.ndim == 2:  # (H,W)
-            mask = mask_tensor
-        elif mask_tensor.ndim == 3:
-            if mask_tensor.shape[0] == 1:  # (1,H,W)
-                mask = mask_tensor.squeeze(0)
-            elif mask_tensor.shape[-1] == 1:  # (H,W,1)
-                mask = mask_tensor.squeeze(-1)
-            else:  # (B,H,W) → 첫 배치만
-                mask = mask_tensor[0]
-        elif mask_tensor.ndim == 4:  # (B,C,H,W)
-            mask = mask_tensor[0, 0, :, :]
-        else:
-            raise ValueError(f"Unexpected mask shape: {mask.shape}")
+        mask = squeeze_mask_output(mask) 
+        return (mask,)
 
-        c = 0 if tapered_corners else 1
-        kernel = np.array([[c, 1, c],
-                           [1, 1, 1],
-                           [c, 1, c]])
 
-        mask = mask.reshape((-1, mask.shape[-2], mask.shape[-1]))
-        out = []
-        for m in mask:
-            arr = m.cpu().numpy()
-            for _ in range(abs(expand)):
-                if expand < 0:
-                    arr = scipy.ndimage.grey_erosion(arr, footprint=kernel, iterations=expand)
-                else:
-                    arr = scipy.ndimage.grey_dilation(arr, footprint=kernel, iterations=expand)
-            out.append(torch.from_numpy(arr))
+#----------------------------------------------------
 
-        return (torch.stack(out, dim=0),)
-    
-    
-    
 class SafeShrinkMask:
     classname    = "SafeShrinkMask"
     node_id      = "SafeShrinkMask"
@@ -666,46 +659,16 @@ class SafeShrinkMask:
 
     @classmethod
     def execute(cls, mask, shrink, tapered_corners):
-        # 입력 타입 정리
-        if not isinstance(mask, torch.Tensor):
-            mask_tensor = torch.from_numpy(np.array(mask))
-        else:
-            mask_tensor = mask
 
-        # 차원 정규화
-        if mask_tensor.ndim == 2:  # (H,W)
-            mask = mask_tensor
-        elif mask_tensor.ndim == 3:
-            if mask_tensor.shape[0] == 1:  # (1,H,W)
-                mask = mask_tensor.squeeze(0)
-            elif mask_tensor.shape[-1] == 1:  # (H,W,1)
-                mask = mask_tensor.squeeze(-1)
-            else:  # (B,H,W) → 첫 배치만
-                mask = mask_tensor[0]
-        elif mask_tensor.ndim == 4:  # (B,C,H,W)
-            mask = mask_tensor[0, 0, :, :]
-        else:
-            raise ValueError(f"Unexpected mask shape: {mask.shape}")
-
-        if shrink <= 0:
-            return (mask,)
-
-        c = 0 if tapered_corners else 1
-        kernel = np.array([[c, 1, c],
-                           [1, 1, 1],
-                           [c, 1, c]])
-
-        mask = mask.reshape((-1, mask.shape[-2], mask.shape[-1]))
-        out = []
-        for m in mask:
-            arr = m.cpu().numpy()
-            shrink_val = min(shrink, min(m.shape[-2], m.shape[-1]))
-            for _ in range(shrink_val):
-                arr = scipy.ndimage.grey_erosion(arr, footprint=kernel, iterations=shrink_val)
-            out.append(torch.from_numpy(arr))
-
-        return (torch.stack(out, dim=0),)
+        mask = ensure_mask_tensor(mask)
         
+        if shrink > 0:
+            mask = erode_mtensor(mask, kernel_size=3, iterations=shrink, tapered_corners=tapered_corners)
+
+        mask = squeeze_mask_output(mask)
+        return (mask,)
+
+#----------------------------------------------------
 
 class SafeTransformMask:
     classname    = "SafeTransformMask"
@@ -729,30 +692,12 @@ class SafeTransformMask:
 
     @classmethod
     def execute(cls, mask, width, height, tapered_corners):
-        if not isinstance(mask, torch.Tensor):
-            mask_tensor = torch.from_numpy(np.array(mask))
-        else:
-            mask_tensor = mask
-
-        # 차원 정규화
-        if mask_tensor.ndim == 2:
-            mask = mask_tensor
-        elif mask_tensor.ndim == 3:
-            if mask_tensor.shape[0] == 1:
-                mask = mask_tensor.squeeze(0)
-            elif mask_tensor.shape[-1] == 1:
-                mask = mask_tensor.squeeze(-1)
-            else:
-                mask = mask_tensor[0]
-        elif mask_tensor.ndim == 4:
-            mask = mask_tensor[0, 0, :, :]
-        else:
-            raise ValueError(f"Unexpected mask shape: {mask_tensor.shape}")
-
-        mask = mask.reshape((-1, mask.shape[-2], mask.shape[-1]))
+        
+        mask = ensure_mask_tensor(mask) 
+        
         out = []
         for m in mask:
-            arr = m.cpu().numpy().astype(np.float32)
+            arr = m[0].cpu().numpy().astype(np.float32)
             resized = cv2.resize(arr, (width, height), interpolation=cv2.INTER_LANCZOS4)
 
             if tapered_corners:
@@ -763,12 +708,11 @@ class SafeTransformMask:
 
             out.append(torch.from_numpy(resized))
 
-        return (torch.stack(out, dim=0),)
+        mask_out = torch.stack(out, dim=0)
 
+        return (mask_out,)
 
-
-
-
+#----------------------------------------------------
 
 class SafeThresholdMask:
     classname    = "SafeThresholdMask"
@@ -790,34 +734,15 @@ class SafeThresholdMask:
 
     @classmethod
     def execute(cls, mask, value):
-        # 입력 타입 정리
-        if not isinstance(mask, torch.Tensor):
-            mask_tensor = torch.from_numpy(np.array(mask))
-        else:
-            mask_tensor = mask
-
-        # 차원 정규화
-        if mask_tensor.ndim == 2:  # (H,W)
-            mask = mask_tensor
-        elif mask_tensor.ndim == 3:
-            if mask_tensor.shape[0] == 1:  # (1,H,W)
-                mask = mask_tensor.squeeze(0)
-            elif mask_tensor.shape[-1] == 1:  # (H,W,1)
-                mask = mask_tensor.squeeze(-1)
-            else:  # (B,H,W) → 첫 배치만
-                mask = mask_tensor[0]
-        elif mask_tensor.ndim == 4:  # (B,C,H,W)
-            mask = mask_tensor[0, 0, :, :]
-        else:
-            raise ValueError(f"Unexpected mask shape: {mask.shape}")
+        mask = ensure_mask_tensor(mask)
 
         mask = (mask > value).float()
         
-        if mask.ndim == 2:
-            mask = mask.unsqueeze(0)
+        mask = squeeze_mask_output(mask)
 
         return (mask,)
 
+#----------------------------------------------------
 
 class SafeSolidMask:
     classname    = "SafeSolidMask"
@@ -841,9 +766,12 @@ class SafeSolidMask:
     @classmethod
     def execute(cls, value, width, height):
 
-        out = torch.full((1, height, width), value, dtype=torch.float32, device="cpu")
+        mask = torch.full((1, 1, height, width), value, dtype=torch.float32, device="cpu")
+        out = squeeze_mask_output(mask)
+
         return (out,)
-    
+
+#----------------------------------------------------
 
 class safeImagePadding:
     classname    = "safeImagePadding"
@@ -870,43 +798,28 @@ class safeImagePadding:
 
     @classmethod
     def execute(cls, image, pad_top=0, pad_bottom=0, pad_left=0, pad_right=0, padding_color="black", feather_strength=0.0):
-        # numpy → torch 변환
-        if not isinstance(image, torch.Tensor):
-            image_tensor = torch.from_numpy(np.array(image))
-        else:
-            image_tensor = image
-            
-         # 차원 정규화
-        if image_tensor.ndim == 3:  # (H,W,C)
-            image_tensor = image_tensor.unsqueeze(0)
-        elif image_tensor.ndim == 4:  # (B,H,W,C)
-            pass
-        else:
-            raise ValueError(f"Unexpected image shape: {image_tensor.shape}")
+        
+        image_tensor = ensure_image_tensor(image)
 
-            
-        # 값 범위 정규화
-        if image_tensor.max() > 1.0:
-            image_tensor = image_tensor / 255.0
-        else:
-            image_tensor = image_tensor.clamp(0, 1)
-
-        b, h, w, c = image.shape
+        b, c, h, w = image_tensor.shape
         fill_val = 0.0 if padding_color == "black" else 1.0
-        canvas = torch.full(
-            (b, h + pad_top + pad_bottom, w + pad_left + pad_right, c),
-            fill_val,
-            dtype=image.dtype,
-            device=image.device
-        )
-        canvas[:, pad_top:pad_top + h, pad_left:pad_left + w, :] = image
 
-        if feather_strength > 0.0:
-            # TODO: feathering logic
-            pass
+        canvas = torch.full(
+            (b, c, h + pad_top + pad_bottom, w + pad_left + pad_right),
+            fill_val,
+            dtype=image_tensor.dtype,
+            device=image_tensor.device
+        )
+
+        canvas[:, :, pad_top:pad_top + h, pad_left:pad_left + w] = image_tensor
+
+        canvas = apply_feathering(canvas, pad_top, pad_bottom, pad_left, pad_right, feather_strength)
+        canvas = canvas.permute(0, 2, 3, 1)
 
         return (canvas,)
 
+
+#----------------------------------------------------
 
 class safeMaskPadding:
     classname    = "safeMaskPadding"
@@ -933,58 +846,30 @@ class safeMaskPadding:
 
     @classmethod
     def execute(cls, mask, pad_top=0, pad_bottom=0, pad_left=0, pad_right=0, padding_color="black", feather_strength=0.0):
-        # 입력 타입 정리
-        if not isinstance(mask, torch.Tensor):
-            mask_tensor = torch.from_numpy(np.array(mask))
-        else:
-            mask_tensor = mask
+        
+        mask = ensure_mask_tensor(mask)
 
-        # 차원 정규화
-        if mask_tensor.ndim == 2:  # (H,W)
-            mask = mask_tensor.unsqueeze(0)  # (1,H,W)
-        elif mask_tensor.ndim == 3:
-            if mask_tensor.shape[0] == 1:  # (1,H,W)
-                mask = mask_tensor
-            elif mask_tensor.shape[-1] == 1:  # (H,W,1)
-                mask = mask_tensor.squeeze(-1).unsqueeze(0)  # (1,H,W)
-            else:  # (B,H,W) → 첫 배치만
-                mask = mask_tensor
-
-        elif mask_tensor.ndim == 4:  # (B,C,H,W)
-            mask = mask_tensor[:, 0, :, :]  # (1,H,W)
-        else:
-            raise ValueError(f"Unexpected mask shape: {mask.shape}")
-            
-        if mask is None:
-            raise ValueError("MaskPadding node requires a mask input.")
-            
-        # 값 범위 정규화
-        if mask.max() > 1.0:
-            mask = mask / 255.0
-        else:
-            mask = mask.clamp(0, 1)
-                   
-        b, h, w = mask.shape
+        b, c, h, w = mask.shape
         fill_val = 0.0 if padding_color == "black" else 1.0
+
         canvas = torch.full(
-            (b, h + pad_top + pad_bottom, w + pad_left + pad_right),
+            (b, c, h + pad_top + pad_bottom, w + pad_left + pad_right),
             fill_val,
             dtype=mask.dtype,
             device=mask.device
         )
-        canvas[:, pad_top:pad_top + h, pad_left:pad_left + w] = mask
+        canvas[:, :, pad_top:pad_top + h, pad_left:pad_left + w] = mask
+    
+        canvas = apply_feathering(canvas, pad_top, pad_bottom, pad_left, pad_right, feather_strength)
+        canvas = squeeze_mask_output(canvas)
 
-        if feather_strength > 0.0:
-            # TODO: feathering logic
-            pass
 
         return (canvas,)
 
-
-
-#--------------------------
+#----------------------------------------------------
 # Mask Node Code(Cuttings)
-#--------------------------
+#----------------------------------------------------
+
 
 class SafeCropMask:
     classname    = "SafeCropMask"
@@ -1009,45 +894,24 @@ class SafeCropMask:
 
     @classmethod
     def execute(cls, mask, x, y, width, height):
-        # 입력 타입 정리
-        if not isinstance(mask, torch.Tensor):
-            mask_tensor = torch.from_numpy(np.array(mask))
-        else:
-            mask_tensor = mask
 
-        # 차원 정규화
-        if mask_tensor.ndim == 2:  # (H,W)
-            mask = mask_tensor
-        elif mask_tensor.ndim == 3:
-            if mask_tensor.shape[0] == 1:  # (1,H,W)
-                mask = mask_tensor.squeeze(0)
-            elif mask_tensor.shape[-1] == 1:  # (H,W,1)
-                mask = mask_tensor.squeeze(-1)
-            else:  # (B,H,W) → 첫 배치만
-                mask = mask_tensor[0]
-        elif mask_tensor.ndim == 4:  # (B,C,H,W)
-            mask = mask_tensor[0, 0, :, :]
-        else:
-            raise ValueError(f"Unexpected mask shape: {mask.shape}")
-            
-        # 값 범위 정규화
-        if mask.max() > 1.0:
-            mask = mask / 255.0
-        else:
-            mask = mask.clamp(0, 1)
-                   
-        mask = mask.reshape((-1, mask.shape[-2], mask.shape[-1]))
-        H, W = mask.shape[-2:]
+        mask = ensure_mask_tensor(mask)
 
-        # 안전 제한 적용
+        b, c, H, W = mask.shape
+
         x = min(x, W - 1)
         y = min(y, H - 1)
         width = min(width, W - x)
         height = min(height, H - y)
 
-        out = mask[:, y:y + height, x:x + width]
-        return (out,)
+        cropped = mask[:, :, y:y + height, x:x + width]
+
+
+        cropped = squeeze_mask_output(cropped)
         
+        return (cropped,)
+        
+#----------------------------------------------------
 
 class SafeCenterCropMask:
     classname    = "SafeCenterCropMask"
@@ -1072,46 +936,23 @@ class SafeCenterCropMask:
 
     @classmethod
     def execute(cls, mask, left, right, top, bottom):
-        # 입력 타입 정리
-        if not isinstance(mask, torch.Tensor):
-            mask_tensor = torch.from_numpy(np.array(mask))
-        else:
-            mask_tensor = mask
+        
+        mask = ensure_mask_tensor(mask)
 
-        # 차원 정규화
-        if mask_tensor.ndim == 2:  # (H,W)
-            mask = mask_tensor
-        elif mask_tensor.ndim == 3:
-            if mask_tensor.shape[0] == 1:  # (1,H,W)
-                mask = mask_tensor.squeeze(0)
-            elif mask_tensor.shape[-1] == 1:  # (H,W,1)
-                mask = mask_tensor.squeeze(-1)
-            else:  # (B,H,W) → 첫 배치만
-                mask = mask_tensor[0]
-        elif mask_tensor.ndim == 4:  # (B,C,H,W)
-            mask = mask_tensor[0, 0, :, :]
-        else:
-            raise ValueError(f"Unexpected mask shape: {mask.shape}")
-            
-        # 값 범위 정규화
-        if mask.max() > 1.0:
-            mask = mask / 255.0
-        else:
-            mask = mask.clamp(0, 1)
-                   
-        mask = mask.reshape((-1, mask.shape[-2], mask.shape[-1]))
-        H, W = mask.shape[-2:]
+        b, c, H, W = mask.shape
         cx, cy = W // 2, H // 2
 
-        # 입력값을 절반 기준으로 제한
-        left = min(left, cx)
-        right = min(right, cx)
-        top = min(top, cy)
+        left   = min(left, cx)
+        right  = min(right, cx)
+        top    = min(top, cy)
         bottom = min(bottom, cy)
 
-        out = mask[:, cy - top: cy + bottom, cx - left: cx + right]
-        return (out,)
+        cropped = mask[:, :, cy - top: cy + bottom, cx - left: cx + right]
 
+        cropped = squeeze_mask_output(cropped)
+        return (cropped,)
+
+#----------------------------------------------------
 
 class SafeFeatherMask:
     classname    = "SafeFeatherMask"
@@ -1136,67 +977,41 @@ class SafeFeatherMask:
 
     @classmethod
     def execute(cls, mask, left, top, right, bottom):
-        # 입력 타입 정리
-        if not isinstance(mask, torch.Tensor):
-            mask_tensor = torch.from_numpy(np.array(mask))
-        else:
-            mask_tensor = mask
 
-        # 차원 정규화
-        if mask_tensor.ndim == 2:  # (H,W)
-            pass
-        elif mask_tensor.ndim == 3:
-            if mask_tensor.shape[0] == 1:  # (1,H,W)
-                mask_tensor = mask_tensor.squeeze(0)
-            elif mask_tensor.shape[-1] == 1:  # (H,W,1)
-                mask_tensor = mask_tensor.squeeze(-1)
-            else:  # (B,H,W) → 첫 배치만
-                mask_tensor = mask_tensor[0]
-        elif mask_tensor.ndim == 4:  # (B,C,H,W)
-            mask_tensor = mask_tensor[0, 0, :, :]
-        else:
-            raise ValueError(f"Unexpected mask shape: {mask_tensor.shape}")
-
-            
-        # 값 범위 정규화
-        if mask_tensor.max() > 1.0:
-            mask_tensor = mask_tensor / 255.0
-        else:
-            mask_tensor = mask_tensor.clamp(0, 1)
+        mask = ensure_mask_tensor(mask)
        
+        b, c, H, W = mask.shape
+        output = mask.clone()
 
-        # 출력 준비
-        output = mask_tensor.clone().unsqueeze(0)  # (1,H,W) 형태로 맞춤
-
-        H, W = output.shape[-2:]
         left   = min(left, W)
         right  = min(right, W)
         top    = min(top, H)
         bottom = min(bottom, H)
 
-        # 좌우 페더링
         for x in range(left):
             feather_rate = (x + 1.0) / left
-            output[:, :, x] *= feather_rate
+            output[:, :, :, x] *= feather_rate
         for x in range(right):
             feather_rate = (x + 1.0) / right
-            output[:, :, -(x+1)] *= feather_rate
+            output[:, :, :, -(x+1)] *= feather_rate
 
-        # 상하 페더링
         for y in range(top):
             feather_rate = (y + 1.0) / top
-            output[:, y, :] *= feather_rate
+            output[:, :, y, :] *= feather_rate
         for y in range(bottom):
             feather_rate = (y + 1.0) / bottom
-            output[:, -(y+1), :] *= feather_rate
+            output[:, :, -(y+1), :] *= feather_rate
+
+        output = squeeze_mask_output(output)
+
 
         return (output,)
 
 
 
-#--------------------------
+#----------------------------------------------------
 # Mask Node Code(Check)
-#--------------------------
+#----------------------------------------------------
 # Mask Preview - original implement from
 # https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
 # upstream requested in https://github.com/Kosinkadink/rfcs/blob/main/rfcs/0000-corenodes.md#preview-nodes
@@ -1216,44 +1031,18 @@ class SafeMaskPreview(IO.ComfyNode):
 
     @classmethod
     def execute(cls, mask, filename_prefix="ComfyUI") -> IO.NodeOutput:
-        # 입력 타입 정리
-        if not isinstance(mask, torch.Tensor):
-            mask_tensor = torch.from_numpy(np.array(mask))
-        else:
-            mask_tensor = mask
 
-        # 차원 정규화
-        if mask_tensor.ndim == 2:  # (H,W)
-            pass
-        elif mask_tensor.ndim == 3:
-            if mask_tensor.shape[0] == 1:  # (1,H,W)
-                mask_tensor = mask_tensor.squeeze(0)
-            elif mask_tensor.shape[-1] == 1:  # (H,W,1)
-                mask_tensor = mask_tensor.squeeze(-1)
-            else:  # (B,H,W) → 첫 배치만
-                mask_tensor = mask_tensor[0]
-        elif mask_tensor.ndim == 4:  # (B,C,H,W)
-            mask_tensor = mask_tensor[0, 0, :, :]
-        else:
-            raise ValueError(f"Unexpected mask shape: {mask_tensor.shape}")
-            
-        # 값 범위 정규화
+        mask_tensor = normalize_mask_tensor(mask)
+
         if mask_tensor.max() > 1.0:
             mask_tensor = mask_tensor / 255.0
         else:
             mask_tensor = mask_tensor.clamp(0, 1)
-       
-
-
-        # 변환된 텐서를 UI에 넘김
+     
 
         return IO.NodeOutput(ui=UI.PreviewMask(mask))
-
-
-
-
-
         
+#----------------------------------------------------        
 
 class SafeMaskSaveOnly:
     classname    = "SafeMaskSaveOnly"
@@ -1276,38 +1065,22 @@ class SafeMaskSaveOnly:
 
     @classmethod
     def execute(cls, mask, filename_prefix="mask_%number"):
-        # 입력 타입 정리
-        if not isinstance(mask, torch.Tensor):
-            mask = torch.from_numpy(np.array(mask))
 
-        # 차원 보정
-        if mask.ndim == 2:
-            mask_img = mask.cpu().numpy()
-        elif mask.ndim == 3:
-            mask_img = mask[0].cpu().numpy()
-        elif mask.ndim == 4:
-            mask_img = mask[0,0].cpu().numpy()
-        else:
-            raise ValueError(f"Unexpected mask shape: {mask.shape}")
+        mask = ensure_mask_tensor(mask) 
+        mask_tensor = normalize_mask_tensor(mask)
 
-        mask_img = mask_img.squeeze()
+        mask_img = mask_tensor.cpu().numpy().squeeze()
         
-        # 저장 경로 준비
         output_dir = os.path.join(folder_paths.get_output_directory(), "mask")
         os.makedirs(output_dir, exist_ok=True)
 
-        # %number 치환 적용
         filename = resolve_filename(filename_prefix, output_dir) + ".png"
         filepath = os.path.join(output_dir, filename)
-        
-        # 저장 (0~1 범위 → 0~255 변환)
+
         imageio.imwrite(filepath, (mask_img * 255).astype("uint8"))
         return {}
 
-
-
-
-
+#----------------------------------------------------
 
 class SafeMaskSaveLink:
     classname    = "SafeMaskSaveLink"
@@ -1331,38 +1104,25 @@ class SafeMaskSaveLink:
 
     @classmethod
     def execute(cls, mask, filename_prefix="mask_%number", save_switch="off"):
-        # 출력 연결용 텐서
-        mask_tensor = mask if isinstance(mask, torch.Tensor) else torch.from_numpy(np.array(mask))
         
-        # 저장 여부 확인
-        if save_switch == "on":
-            # 저장용 이미지 → 항상 2D로 변환
-            if mask_tensor.ndim == 4:
-                mask_img = mask_tensor[0,0].cpu().numpy()
-            elif mask_tensor.ndim == 3:
-                mask_img = mask_tensor[0].cpu().numpy()
-            elif mask_tensor.ndim == 2:
-                mask_img = mask_tensor.cpu().numpy()
-            else:
-                raise ValueError(f"Unexpected mask shape: {mask_tensor.shape}")
+        mask_tensor = ensure_mask_tensor(mask)
 
-            mask_img = mask_img.squeeze()
-            
-            # 저장 경로 준비
+        if save_switch == "on":
+
+            mask_img = normalize_mask_tensor(mask_tensor).cpu().numpy().squeeze()
+
             output_dir = os.path.join(folder_paths.get_output_directory(), "mask")
             os.makedirs(output_dir, exist_ok=True)
 
-            # %number 치환 적용
             filename = resolve_filename(filename_prefix, output_dir) + ".png"
             filepath = os.path.join(output_dir, filename)
-            # 저장 (0~1 범위 → 0~255)
+
             imageio.imwrite(filepath, (mask_img * 255).astype("uint8"))
             
-        # 출력 연결
+        mask_tensor = squeeze_mask_output(mask_tensor)
         return (mask_tensor,)
 
-
-
+#----------------------------------------------------
 
 class SafeMaskChecker:
     classname    = "SafeMaskChecker"
@@ -1388,89 +1148,51 @@ class SafeMaskChecker:
     @staticmethod
     def mask_to_image(mask):
         arr = mask.cpu().numpy().astype(np.float32)
-        if arr.ndim == 3:   # (B,H,W) → 첫 배치만 사용
+        if arr.ndim == 3:
             arr = arr[0]
-        rgb = np.stack([arr]*3, axis=-1).astype(np.float32)  # (H,W,3)
+        rgb = np.stack([arr]*3, axis=-1).astype(np.float32)
         return torch.from_numpy(rgb)
 
     @classmethod
     def execute(cls, base_mask, edit_mask, color="red"):
-        if not isinstance(base_mask, torch.Tensor):
-            base_mask = torch.from_numpy(np.array(base_mask))
-        if not isinstance(edit_mask, torch.Tensor):
-            edit_mask = torch.from_numpy(np.array(edit_mask))
+        
+        base_mask = ensure_mask_tensor(base_mask)
 
-        # 차원 맞추기
-        if base_mask.ndim == 2:
-            base_mask = base_mask.unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
-        elif base_mask.ndim == 3:
-            base_mask = base_mask.unsqueeze(1)               # (B,1,H,W)
+        edit_mask = ensure_mask_tensor(edit_mask)
 
-        if edit_mask.ndim == 2:
-            edit_mask = edit_mask.unsqueeze(0).unsqueeze(0)
-        elif edit_mask.ndim == 3:
-            edit_mask = edit_mask.unsqueeze(1)
-
-        # 값 범위 정규화
-        base_mask = base_mask.float()
-        edit_mask = edit_mask.float()
-
-        if base_mask.max() > 1.0:
-            base_mask = base_mask / 255.0
-        else:
-            base_mask = base_mask.clamp(0, 1)
-
-        if edit_mask.max() > 1.0:
-            edit_mask = edit_mask / 255.0
-        else:
-            edit_mask = edit_mask.clamp(0, 1)
-
-        # 크기 비교 후 리사이즈
         if base_mask.shape[-2:] != edit_mask.shape[-2:]:
             base_mask = F.interpolate(base_mask, size=edit_mask.shape[-2:], mode="nearest")
             edit_mask = F.interpolate(edit_mask, size=base_mask.shape[-2:], mode="nearest")
 
-        base_mask = base_mask.squeeze(1)  # (B,H,W)
+        base_mask = base_mask.squeeze(1)
         edit_mask = edit_mask.squeeze(1)
 
-        # 배경: 원본 마스크 → RGB
-        base_img = cls.mask_to_image(base_mask[0]).to(edit_mask.device)  # (H,W,3)
+        base_img = cls.mask_to_image(base_mask[0]).to(edit_mask.device)
         
-        # diff 마스크 계산
         base_arr = np.squeeze(base_mask.cpu().numpy()).astype(np.float32)
         edit_arr = np.squeeze(edit_mask.cpu().numpy()).astype(np.float32)
-        diff_mask = (np.abs(edit_arr - base_arr) > 0.5).astype("float32")  # (H,W)
+        diff_mask = (np.abs(edit_arr - base_arr) > 0.5).astype("float32")
 
-        # torch 기반 overlay 생성 (곱셈 방식)
         COLOR_MAP = {
             "red":   (1.0, 0.0, 0.0),
             "green": (0.0, 1.0, 0.0),
             "blue":  (0.0, 0.0, 1.0),
         }
-        color_rgb = torch.tensor(COLOR_MAP.get(color, COLOR_MAP["red"]), dtype=torch.float32, device=base_img.device)  # (3,)
+        color_rgb = torch.tensor(COLOR_MAP.get(color, COLOR_MAP["red"]), dtype=torch.float32, device=base_img.device)
 
-        mask_t = torch.from_numpy(diff_mask).to(base_img.device).unsqueeze(-1).float()  # (H,W,1)
-        overlay_tensor = mask_t * color_rgb  # (H,W,3)
+        mask_t = torch.from_numpy(diff_mask).to(base_img.device).unsqueeze(-1).float()
+        overlay_tensor = mask_t * color_rgb
 
-        # 합성 (알파 블렌딩)
         alpha = 1
         checked_tensor = base_img * (1 - mask_t * alpha) + overlay_tensor * (mask_t * alpha)
-        checked_tensor = checked_tensor.clamp(0,1)  # (H,W,3)
+        checked_tensor = checked_tensor.clamp(0,1)
 
         
-        checked_tensor = checked_tensor.unsqueeze(0)        # (1,H,W,3)
+        checked_tensor = checked_tensor.unsqueeze(0)
 
-        # 최종 반환
         return (checked_tensor,)
 
-
-
-
-
-
-
-
-
+#----------------------------------------------------
 
 class SafeMaskCheckerDiff:
     classname    = "SafeMaskCheckerDiff"
@@ -1494,52 +1216,25 @@ class SafeMaskCheckerDiff:
 
     @classmethod
     def execute(cls, base_Image, base_mask, edit_mask, color="red"):
-        # 입력 타입 정리
-        if not isinstance(base_Image, torch.Tensor):
-            base_Image = torch.from_numpy(np.array(base_Image))
-
-        if not isinstance(base_mask, torch.Tensor):
-            base_mask = torch.from_numpy(np.array(base_mask))
-        else:
-            base_mask = base_mask
-
-        if not isinstance(edit_mask, torch.Tensor):
-            edit_mask = torch.from_numpy(np.array(edit_mask))
-        else:
-            edit_mask = edit_mask
-            
-        if base_Image.ndim == 3:   # (H,W,C)
-            base_img = base_Image.unsqueeze(0).float()   # (1,H,W,C)
-        elif base_Image.ndim == 4: # (B,H,W,C)
-            base_img = base_Image.float()
-        else:
-            raise ValueError(f"Unexpected image shape: {base_Image.shape}")
-
-        if base_mask.ndim == 2:
-            base_mask = base_mask.unsqueeze(0)  # (1,H,W)
-            
-        if edit_mask.ndim == 2:
-            edit_mask = edit_mask.unsqueeze(0)  # (1,H,W)
-            
-        # 값 범위 정규화
-        if base_mask.max() > 1.0:
-            base_mask = base_mask / 255.0
-        else:
-            base_mask = base_mask.clamp(0, 1)
         
-        if edit_mask.max() > 1.0:
-            edit_mask = edit_mask / 255.0
+        base_img = ensure_image_tensor(base_Image)
+        base_mask = ensure_mask_tensor(base_mask)
+        edit_mask = ensure_mask_tensor(edit_mask)
+
+        base_img = base_img.float()
+        if base_img.max() > 1.0:
+            base_img = base_img / 255.0
         else:
-            edit_mask = edit_mask.clamp(0, 1)
+            base_img = base_img.clamp(0, 1)
+
+        base_mask = normalize_mask_tensor(base_mask)
+        edit_mask = normalize_mask_tensor(edit_mask) 
         
-        # 크기 비교 후 리사이즈 (edit_mask 기준)
         if base_mask.shape[-2:] != edit_mask.shape[-2:]:
-            # (B,H,W) → (B,1,H,W) 로 바꿔서 interpolate
             base_mask = base_mask.unsqueeze(1)
             base_mask = F.interpolate(base_mask, size=edit_mask.shape[-2:], mode="nearest")
             base_mask = base_mask.squeeze(1)
-            
-        # 항상 0~1 범위로 normalize
+
         if base_img.max() > 1.0:
             base_img = base_img / 255.0
         else:
@@ -1552,11 +1247,9 @@ class SafeMaskCheckerDiff:
             "blue":  (0.0, 0.0, 1.0),
         }
 
-        # 마스크 배열 준비
         base_arr = np.squeeze(base_mask.cpu().numpy()).astype(np.float32)
         edit_arr = np.squeeze(edit_mask.cpu().numpy()).astype(np.float32)
 
-        # 차이 마스크 계산
         threshold = 0.3
         diff_mask_np = (np.abs(edit_arr - base_arr) > threshold).astype(np.float32)
 
@@ -1567,26 +1260,26 @@ class SafeMaskCheckerDiff:
             diff_mask = torch.from_numpy(diff_mask_np)
             mask2d = (diff_mask > 0).numpy()   # (H,W)
 
-            # 결과 이미지 복사
             result_rgb = base_img.clone()
 
-            # 오버레이 색상 벡터
             color_rgb = torch.tensor(COLOR_MAP.get(color, COLOR_MAP["red"]), dtype=torch.float32)
-            color_rgb = color_rgb.view(1, 1, 3).expand_as(base_img)  # (H,W,3)
-            mask_idx = torch.from_numpy(mask2d).unsqueeze(-1).expand_as(base_img)  # (H,W,3)
+            color_rgb = color_rgb.view(1, 3, 1, 1).expand_as(base_img)
+            
+            mask_idx = torch.from_numpy(mask2d).to(base_img.device).unsqueeze(0).unsqueeze(0)
+            mask_idx = mask_idx.expand_as(base_img)
 
-            # 마스크 영역만 알파 블렌딩 적용
             result_rgb = base_img * (1 - mask_idx * alpha) + color_rgb * (mask_idx * alpha)
             result_rgb = result_rgb.clamp(0, 1)
-
+            
+            result_rgb = result_rgb.permute(0, 2, 3, 1)
         return (result_rgb,)
 
 
 
 
-#--------------------------
+#----------------------------------------------------
 #Registration
-#--------------------------
+#----------------------------------------------------
     
     
 NODE_CLASS_MAPPINGS = {
