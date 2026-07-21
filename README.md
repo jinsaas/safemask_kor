@@ -33,7 +33,7 @@ It also works with the latest ComfyUI versions.
 - Added internal output functionality to nodes.
 
 
-# V4.0.1 정보
+# V4.0.1
 -Updates in this version
 
 -Further improvements to the Mask Load node
