@@ -33,6 +33,13 @@ It also works with the latest ComfyUI versions.
 - Added internal output functionality to nodes.
 
 
+# V4.0.1 정보
+-Updates in this version
+
+-Further improvements to the Mask Load node
+
+-You can now open files using the upload widget as well. (Loading masks from the 'Mask' folder is recommended to minimize the risk of conflicts.)
+
 ## Extended Features
 
 - **Safe MaskToImage Node**: Converts a mask into an image (e.g., grayscale visualization).
