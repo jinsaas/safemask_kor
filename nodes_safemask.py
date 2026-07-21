@@ -413,7 +413,7 @@ class SafeMaskLoader(IO.ComfyNode):
             "마스크를 미리보는 기능도 있지만 프리뷰의 이미지 에디터 기능으로 수정된 내용은 실제 마스크 데이터에 반영되지 않으며,\n"
             "데이터 손상/왜곡의 원인이 될 수 있습니다.",
             inputs=[
-                IO.Combo.Input("mask_file", options=files, default=files[0], tooltip="불러올 마스크 파일 이름"),
+                IO.Combo.Input("mask_file", options=files, default=files[0], tooltip="불러올 마스크 파일 이름. 위젯 선택시 반드시 [Mask]폴더 안에서 가져오는걸 권장합니다.", upload=IO.UploadType.image, image_folder=IO.FolderType.input),
                 IO.Boolean.Input("invert", default=False, tooltip="마스크 반전 여부"),
                 IO.Boolean.Input("show_preview", default=False, tooltip="프리뷰 표시 여부"),
             ],
