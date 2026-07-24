@@ -642,7 +642,7 @@ class SafeImageColorToMask(IO.ComfyNode):
 class SafeImageComposite(IO.ComfyNode):
 
     @classmethod
-    def sanitize_input_mask(mask):
+    def sanitize_input_mask(cls, mask):
         if mask is None:
             return None
 
@@ -743,7 +743,7 @@ class SafeImageComposite(IO.ComfyNode):
 class SafeMaskComposite(IO.ComfyNode):
 
     @classmethod
-    def sanitize_input_mask(mask):
+    def sanitize_input_mask(cls, mask):
         if mask is None:
             return None
 
@@ -841,7 +841,7 @@ class SafeMaskComposite(IO.ComfyNode):
 class SafeLatentComposite(IO.ComfyNode):
 
     @classmethod
-    def sanitize_input_mask(mask):
+    def sanitize_input_mask(cls, mask):
         if mask is None:
             return None
 
