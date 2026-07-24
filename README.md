@@ -33,12 +33,19 @@ It also works with the latest ComfyUI versions.
 - Added internal output functionality to nodes.
 
 
-# V4.0.1
+### V4.0.1
 -Updates in this version
 
 -Further improvements to the Mask Load node
 
 -You can now open files using the upload widget as well. (Loading masks from the 'Mask' folder is recommended to minimize the risk of conflicts.)
+
+### V4.0.2
+-Updates in this version
+
+-composite node error Fixed
+
+-Add 4 node
 
 ## Extended Features
 
