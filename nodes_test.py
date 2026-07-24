@@ -14,6 +14,7 @@ from PIL import Image
 from typing_extensions import override
 import folder_paths
 import math
+import random
 
 import comfy
 import comfy.utils
@@ -584,6 +585,364 @@ def generate_tiled_edge_mask(arr_bgr, threshold_sat, amp_factor, blur_kernel, ti
     
     return automask.astype(np.float32)
 
+#--------------------------
+#  Utillity Header
+#--------------------------
+
+def ensure_mask_2d_tensor(t: torch.Tensor, to_rgb: bool=False) -> torch.Tensor:
+    """
+    Exactly (B,1,H,W) Setting
+    to_rgb=True, (B,3,H,W) Expansion Setting.
+    """
+    if not isinstance(t, torch.Tensor):
+        t = torch.from_numpy(np.array(t)).float()
+
+    if t.dim() == 2:          # (H,W)
+        t = t.unsqueeze(0).unsqueeze(0)   # (1,1,H,W)
+    elif t.dim() == 3:        # (B,H,W)
+        t = t.unsqueeze(1)               # (B,1,H,W)
+    elif t.dim() == 4:        # (B,C,H,W)
+        pass
+    else:
+        raise ValueError(f"Unsupported mask shape: {t.shape}")
+
+    t = t.float()
+
+    if to_rgb:
+        if t.shape[1] == 1:   # (B,1,H,W)
+            t = t.repeat(1,3,1,1)   # (B,3,H,W)
+
+    return t
+
+def normalize_mask(mask_tensor: torch.Tensor) -> torch.Tensor:
+    return (mask_tensor - mask_tensor.min()) / (mask_tensor.max() - mask_tensor.min() + 1e-8)
+
+ 
+ 
+def make_feather_mask(h, w, c, border=16):
+    mask = torch.ones((h,w,c), dtype=torch.float32)
+    for k in range(border):
+        alpha = k / border
+        mask[k,:,:] *= alpha
+        mask[-k-1,:,:] *= alpha
+        mask[:,k,:] *= alpha
+        mask[:,-k-1,:] *= alpha
+    return mask
+
+
+def subtract_mask(base, *removes):
+    # Multi Remover mask Settings
+    combined_remove = np.maximum.reduce(removes)
+    return np.clip(base - combined_remove, 0, 1)
+
+def difference_mask(mask_a, mask_b):
+    return np.abs(mask_a - mask_b)
+
+
+#--------------------------
+#  Mask Utillity Node
+#--------------------------
+
+class SafeTileSoftFillng(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="SafeTileSoftFillng",
+            display_name="타일링 보정채우기(pytorch)",
+            category="커스텀마스크/유틸",
+            description="pytorch기반 타일링 채우기. 부분이미지 보정용으로 쓸 수 있습니다.",
+            inputs=[
+                IO.Image.Input("tile_image", tooltip="크롭된 타일 이미지"),
+                IO.Int.Input("canvas_width", default=512, min=64, max=8192, step=8, tooltip="캔버스 X축 크기"),
+                IO.Int.Input("canvas_height", default=512, min=64, max=8192, step=8, tooltip="캔버스 Y축 크기"),
+                IO.Int.Input("rematch", default=0, min=0, max=64, step=1, tooltip="경계 보정 횟수"),
+            ],
+            outputs=[
+                IO.Image.Output("image", tooltip="보정된 캔버스 이미지")
+            ]
+        )
+
+    @classmethod
+    def execute(cls, tile_image, canvas_width, canvas_height, rematch) -> IO.NodeOutput:
+        tile_image = tile_image.float()
+        B, H, W, C = tile_image.shape
+
+        # stride logic
+        rematch = min(rematch, min(H, W) - 1)
+        stride_x = max(W - rematch, 1)
+        stride_y = max(H - rematch, 1)
+
+        repeat_x = canvas_width // stride_x
+        repeat_y = canvas_height // stride_y
+
+        # Canvas Settings
+        canvas = torch.zeros((B, canvas_height, canvas_width, C), dtype=torch.float32)
+        weight = torch.zeros_like(canvas)
+
+        # Make feather mask
+        mask = make_feather_mask(H, W, C, border=min(rematch, 16))
+
+        # Tile layout + Boundary correction
+        for i in range(repeat_y + 1):
+            for j in range(repeat_x + 1):
+                y0 = i * stride_y
+                x0 = j * stride_x
+                y1 = min(y0 + H, canvas_height)
+                x1 = min(x0 + W, canvas_width)
+
+                h_slice = y1 - y0
+                w_slice = x1 - x0
+
+                if h_slice > 0 and w_slice > 0:
+                    # Tile layout
+                    canvas[:, y0:y1, x0:x1, :] += tile_image[:, :h_slice, :w_slice, :]
+                    weight[:, y0:y1, x0:x1, :] += 1.0
+
+                    # Boundary correction
+                    canvas[:, y0:y1, x0:x1, :] += tile_image[:, :h_slice, :w_slice, :] * mask[:h_slice, :w_slice, :]
+                    weight[:, y0:y1, x0:x1, :] += mask[:h_slice, :w_slice, :]
+
+        # Averaging and blank handling
+        canvas = canvas / torch.clamp(weight, min=1.0)
+        canvas[weight == 0] = 0
+
+        return IO.NodeOutput(canvas)
+
+
+
+#--------------------------
+
+class SafeMask_Subeditor(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="SafeMask_Subeditor",
+            display_name="마스크 서브에디터",
+            category="커스텀마스크/유틸",
+            description="마스크 추가 작업용 에디터. 과처리된 마스크를 손질하거나 덧붙일 수 있습니다.",
+            inputs=[
+                IO.Mask.Input("base_mask", tooltip="작업할 마스크"),
+                IO.Mask.Input("user_mask", tooltip="지울 영역 선택"),
+                IO.Combo.Input("subtract_mode", options=["delete","subtract","difference"], default="delete",
+                               tooltip="제거 방식.\n 완전제거-부분제거-차이값만 남김"),
+                IO.Combo.Input("blur_mode", options=["none","soft","hard"], default="none", tooltip="블러 셋팅"),
+                IO.Combo.Input("blur_str", options=["0","1","2","3","4","5","6","7","8","9","10"], default="0", tooltip="블러 커널 크기"),
+                IO.Mask.Input("add_mask", tooltip="덧붙일 추가 마스크", optional=True),
+            ],
+            outputs=[IO.Mask.Output("mask", tooltip="편집된 마스크")]
+        )
+
+    @classmethod
+    def execute(cls, base_mask, user_mask, subtract_mode, blur_mode, blur_str="0", add_mask=None) -> IO.NodeOutput:
+
+        result = ensure_mask_tensor(base_mask)
+        user_mask = ensure_mask_tensor(user_mask)
+
+        # Removal mode
+        if subtract_mode == "delete":
+            result = torch.where(user_mask > 0.5, torch.zeros_like(result), result)
+        elif subtract_mode == "subtract":
+            result = torch.clamp(result - user_mask, 0.0, 1.0)
+        elif subtract_mode == "difference":
+            result = torch.abs(result - user_mask)
+
+        # Additional mask
+        if add_mask is not None:
+            add_mask = ensure_mask_tensor(add_mask)
+            result = torch.clamp(result + add_mask, 0.0, 1.0)
+
+        # Blur
+        blur_strength = int(blur_str)
+        if blur_strength > 0 and blur_mode != "none":
+            if blur_mode == "soft":
+                k = min(2 * blur_strength - 1, 11)
+                kernel = torch.ones((1,1,k,k), device=result.device) / (k*k)
+                result = F.conv2d(ensure_mask_tensor(result), kernel, padding=k//2)
+            elif blur_mode == "hard":
+                k = min(2 * blur_strength + 1, 13)
+                kernel = torch.ones((1,1,k,k), device=result.device) / (k*k)
+                result = F.conv2d(ensure_mask_tensor(result), kernel, padding=k//2)
+
+        result = ensure_mask_tensor(result)
+        return IO.NodeOutput(result)
+
+#--------------------------
+
+class SafeMask_CompositeAdv(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="SafeMask_CompositeAdv",
+            display_name="콤포짓 마스크 어드밴스(멀티)",
+            category="커스텀마스크/유틸",
+            description="다중 마스크 합성 + 경계보정 + 팽창/축소(소프트) + 블러 처리.",
+            inputs=[
+                IO.Mask.Input("base_mask", tooltip="원본 마스크"),
+                IO.Mask.Input("user_mask", tooltip="합성 대상 마스크"),
+                IO.Combo.Input("blend_mode", options=["max","average","overwrite","or","and"], default="max", tooltip="합성 방식 지정"),
+                IO.Float.Input("feather_strength", default=0, min=0, max=5, step=1, tooltip="페더링 강도 설정"),
+                IO.Int.Input("mask_adjust_unit", default=0, min=-5, max=5, step=1, tooltip="양수=팽창, 음수=축소 (소프트 처리)"),
+                IO.Combo.Input("blur_mode", options=["none","soft","hard"], default="none", tooltip="블러 셋팅"),
+                IO.Combo.Input("blur_str", options=["0","1","2","3","4","5","6","7","8","9","10"], default="0", tooltip="블러 강도 선택"),
+                IO.Combo.Input("invert", options=["off","on"], default="off", tooltip="반전"),
+                IO.Mask.Input("add_mask1", tooltip="추가 마스크", optional=True),
+                IO.Mask.Input("add_mask2", tooltip="추가 마스크", optional=True),
+                IO.Mask.Input("add_mask3", tooltip="추가 마스크", optional=True),
+                IO.Mask.Input("add_mask4", tooltip="추가 마스크", optional=True),
+                IO.Mask.Input("add_mask5", tooltip="추가 마스크", optional=True),
+            ],
+            outputs=[IO.Mask.Output("mask", tooltip="합성된 마스크")]
+        )
+
+    @classmethod
+    def execute(cls, base_mask, user_mask, blend_mode="max", feather_strength=0, mask_adjust_unit=0,
+                blur_mode="none", blur_str="0", invert="off", add_mask1=None, add_mask2=None, add_mask3=None,
+                add_mask4=None, add_mask5=None) -> IO.NodeOutput:
+
+        result = ensure_mask_tensor(base_mask)
+        user_mask = ensure_mask_tensor(user_mask)
+
+        # Basic Maskcomposite
+        if blend_mode == "max":
+            result = torch.max(result, user_mask)
+        elif blend_mode == "average":
+            result = (result + user_mask) / 2
+        elif blend_mode == "overwrite":
+            result = torch.where(user_mask > 0.5, torch.ones_like(result), result)
+        elif blend_mode == "or":
+            result = torch.clamp(result + user_mask, 0, 1)
+        elif blend_mode == "and":
+            result = result * user_mask
+
+        # Additional Maskcomposite
+        for add_mask in [add_mask1, add_mask2, add_mask3, add_mask4, add_mask5]:
+            if add_mask is not None:
+                add_mask = ensure_mask_tensor(add_mask)
+                if blend_mode == "max":
+                    result = torch.max(result, add_mask)
+                elif blend_mode == "average":
+                    result = (result + add_mask) / 2
+                elif blend_mode == "overwrite":
+                    result = torch.where(add_mask > 0.5, torch.ones_like(result), result)
+                elif blend_mode == "or":
+                    result = torch.clamp(result + add_mask, 0, 1)
+                elif blend_mode == "and":
+                    result = result * add_mask
+
+        # Feathering
+        if feather_strength > 0:
+            k = max(1, 2 * int(feather_strength) - 1)
+            kernel = torch.ones((1,1,k,k), device=result.device) / (k*k)
+            result = F.conv2d(result, kernel, padding=k//2)
+
+        if mask_adjust_unit != 0:
+            k = min(2*abs(mask_adjust_unit)+1, 9)
+            kernel = torch.ones((1,1,k,k), device=result.device) / (k*k)
+            result = F.conv2d(result, kernel, padding=k//2)
+            if mask_adjust_unit < 0:
+                result = torch.sigmoid(5*(result-0.5))
+            else:
+                result = torch.clamp(result, 0, 1)
+
+        blur_strength = int(blur_str)
+        if blur_strength > 0 and blur_mode != "none":
+            k = max(1, 2 * blur_strength - 1)
+            kernel = torch.ones((1,1,k,k), device=result.device) / (k*k)
+            if blur_mode == "soft":
+                result = F.conv2d(result, kernel, padding=k//2)
+            elif blur_mode == "hard":
+                result = F.conv2d(result, kernel, padding=k//2)
+                result = F.conv2d(result, kernel, padding=k//2)
+
+        # Invert
+        if invert == "on":
+            result = 1 - result
+
+        result = torch.clamp(result, 0, 1)
+        result = ensure_mask_tensor(result)
+        return IO.NodeOutput(result)
+
+
+#--------------------------
+
+class SafeMaskAmplifier(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="SafeMaskAmplifier",
+            display_name="마스크 증폭기",
+            category="커스텀마스크/유틸",
+            description="입력 마스크를 기반으로 증폭/보정 후 유저마스크와 합성 + 부분강조",
+            inputs=[
+                IO.Mask.Input("mask", tooltip="입력 마스크"),
+                IO.Float.Input("amp_factor", default=1.0, min=1.0, max=1.999, step=0.001, tooltip="출력 증폭 계수"),
+                IO.Combo.Input("invert", options=["off","on"], default="off", tooltip="반전"),
+                IO.Float.Input("gamma", default=0.6, min=0.001, max=1.999, step=0.001, tooltip="감마 보정 (pow 값)"),
+                IO.Combo.Input("clahe", options=["off","on"], default="off", tooltip="클라헤 보정"),
+                IO.Mask.Input("user_mask", tooltip="합성 대상 마스크", optional=True),
+                IO.Combo.Input("blend_mode", options=["max","average","overwrite"], default="max", tooltip="합성 방식 지정"),
+                IO.Combo.Input("highlight_region", options=["none","left","right","top","bottom"], default="none", tooltip="부분 강조 방향"),
+                IO.Float.Input("highlight_strength", default=0.0, min=0.0, max=2.0, step=0.1, tooltip="부분 강조 강도"),
+            ],
+            outputs=[IO.Mask.Output("mask", tooltip="증폭된 마스크")]
+        )
+
+    @classmethod
+    def execute(cls, mask, amp_factor=1.0, invert="off", gamma=0.6, clahe="off", user_mask=None, blend_mode="max",
+                highlight_region="none", highlight_strength=0.0) -> IO.NodeOutput:
+
+        amplication = min(max(amp_factor,0.000),1.999)
+        mask_tensor = ensure_mask_tensor(mask)
+        mask_tensor = torch.clamp(mask_tensor * amplication, 0, 1)
+
+        # CLAHE
+        if clahe == "on":
+            mask_img = (mask_tensor.squeeze().cpu().numpy() * 255).astype(np.uint8)
+            clahe_obj = cv2.createCLAHE(clipLimit=1.0, tileGridSize=(32,32))
+            mask_img = clahe_obj.apply(mask_img)
+            mask_tensor = ensure_mask_tensor(torch.from_numpy(mask_img).float() / 255.0)
+
+        # Blending Usermask
+        if user_mask is not None:
+            user_mask = ensure_mask_tensor(user_mask)
+            if blend_mode == "max":
+                mask_tensor = torch.max(mask_tensor, user_mask)
+            elif blend_mode == "average":
+                mask_tensor = (mask_tensor + user_mask) / 2
+            elif blend_mode == "overwrite":
+                mask_tensor = torch.where(user_mask > 0.5, torch.ones_like(mask_tensor), mask_tensor)
+
+        # Emphasis on part
+        if highlight_region != "none" and highlight_strength > 0.0:
+            B, C, H, W = mask_tensor.shape
+            if highlight_region == "left":
+                grad = torch.linspace(highlight_strength, 1.0, W, device=mask_tensor.device)
+                grad = grad.unsqueeze(0).unsqueeze(0).unsqueeze(2).repeat(B,1,H,1)
+            elif highlight_region == "right":
+                grad = torch.linspace(1.0, highlight_strength, W, device=mask_tensor.device)
+                grad = grad.unsqueeze(0).unsqueeze(0).unsqueeze(2).repeat(B,1,H,1)
+            elif highlight_region == "top":
+                grad = torch.linspace(highlight_strength, 1.0, H, device=mask_tensor.device)
+                grad = grad.unsqueeze(0).unsqueeze(0).unsqueeze(-1).repeat(B,1,1,W)
+            elif highlight_region == "bottom":
+                grad = torch.linspace(1.0, highlight_strength, H, device=mask_tensor.device)
+                grad = grad.unsqueeze(0).unsqueeze(0).unsqueeze(-1).repeat(B,1,1,W)
+            mask_tensor = torch.clamp(mask_tensor * grad, 0, 1)
+
+        # Gamma Setting
+        gamma_factor = min(max(gamma,0.000),1.999)
+        mask_tensor = mask_tensor.pow(gamma_factor)
+
+        # Invert
+        if invert == "on":
+            mask_tensor = 1 - mask_tensor
+
+        mask_tensor = ensure_mask_tensor(mask_tensor)
+        return IO.NodeOutput(mask_tensor)
+
+
+
 #----------------------------------------------------
 # Mask Preview - original implement from
 # https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
@@ -654,11 +1013,18 @@ class AutoMaskGenerator(IO.ComfyNode):
 #Registration
 #----------------------------------------------------
     
-    
 TEST_NODE_CLASS_MAPPINGS = {
-    "AutoMaskGenerator": AutoMaskGenerator
+    "SafeTileSoftFillng": SafeTileSoftFillng,
+    "SafeMask_Subeditor": SafeMask_Subeditor,
+    "SafeMask_CompositeAdv": SafeMask_CompositeAdv,
+    "SafeMaskAmplifier": SafeMaskAmplifier,
+    "AutoMaskGenerator": AutoMaskGenerator,
 }
 
 TEST_NODE_DISPLAY_NAME_MAPPINGS = {
+    "SafeTileSoftFillng": "타일링 보정채우기(pytorch)",
+    "SafeMask_Subeditor": "마스크 서브에디터",
+    "SafeMask_CompositeAdv": "콤포짓 마스크 어드밴스(멀티)",
+    "SafeMaskAmplifier": "마스크 증폭기",
     "AutoMaskGenerator": "자동 마스크 생성기"
 }
