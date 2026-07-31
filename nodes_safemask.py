@@ -1304,7 +1304,7 @@ class SafeMaskPadding(IO.ComfyNode):
         canvas[:, :, pad_top:pad_top + h, pad_left:pad_left + w] = mask
     
         canvas = apply_feathering(canvas, feather_size, feather_strength)
-        canvas = ensure_mask_output_shape(mask)
+        canvas = ensure_mask_output_shape(canvas)
 
         return IO.NodeOutput(canvas,)
 
