@@ -1,6 +1,6 @@
 import logging
 
-version = "4.0.2"
+version = "4.0.3"
 logging.info(f"### Loading: ComfyUI_SafeMask_Pack (v{version})")
 
 from .nodes_safemask import (
