@@ -47,6 +47,11 @@ It also works with the latest ComfyUI versions.
 
 -Add 4 node
 
+### V4.0.3
+-Updates in this version
+
+-saveonly node : add preview option
+
 ## Extended Features
 
 - **Safe MaskToImage Node**: Converts a mask into an image (e.g., grayscale visualization).
