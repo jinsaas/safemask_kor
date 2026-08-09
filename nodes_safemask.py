@@ -48,6 +48,8 @@ def normalize_mask_tensor(mask):
             return mask_tensor[0]
     elif mask_tensor.ndim == 4:
         return mask_tensor[0, 0, :, :]
+    elif mask_tensor.ndim == 5:
+        return mask_tensor
     else:
         raise ValueError(f"Unexpected mask shape: {mask_tensor.shape}")
 
@@ -1504,6 +1506,9 @@ class SafeMaskPreview(IO.ComfyNode):
         return IO.NodeOutput(ui=UI.PreviewMask(mask))
         
 #----------------------------------------------------        
+# Mask Preview - original implement from
+# https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
+# upstream requested in https://github.com/Kosinkadink/rfcs/blob/main/rfcs/0000-corenodes.md#preview-nodes
 
 class SafeMaskSaveOnly(IO.ComfyNode):
 
@@ -1517,14 +1522,15 @@ class SafeMaskSaveOnly(IO.ComfyNode):
             inputs=[
                 IO.Mask.Input("mask", tooltip="저장할 마스크 텐서"),
                 IO.String.Input("filename_prefix", default="mask_%number", tooltip="저장할 파일 이름 접두사"),
+                IO.Boolean.Input("show_preview", default=False, tooltip="프리뷰 표시 여부"),
             ],
-            hidden=[IO.Hidden.prompt],
-            is_output_node=True, 
+            hidden=[IO.Hidden.prompt, IO.Hidden.extra_pnginfo],
+            is_output_node=True,
             outputs=[],
         )
 
     @classmethod
-    def execute(cls, mask, filename_prefix="mask_%number") -> IO.NodeOutput:
+    def execute(cls, mask, filename_prefix="mask_%number", show_preview=False) -> IO.NodeOutput:
 
         mask = ensure_mask_tensor(mask) 
         mask_tensor = normalize_mask_tensor(mask)
@@ -1538,6 +1544,11 @@ class SafeMaskSaveOnly(IO.ComfyNode):
         filepath = os.path.join(output_dir, filename)
 
         imageio.imwrite(filepath, (mask_img * 255).astype("uint8"))
+
+        mask = ensure_mask_output_shape(mask_tensor)
+        if show_preview:
+            preview_mask = mask # [B, 1, H, W]
+            return IO.NodeOutput(ui=UI.PreviewMask(preview_mask))
         return IO.NodeOutput()
 
 #----------------------------------------------------
