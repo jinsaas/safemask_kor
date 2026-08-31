@@ -1204,7 +1204,7 @@ class SafeSolidMask(IO.ComfyNode):
         mask = torch.full((1, 1, height, width), value, dtype=torch.float32, device="cpu")
         mask = ensure_mask_output_shape(mask)
 
-        return IO.NodeOutput(out,)
+        return IO.NodeOutput(mask,)
 
 #----------------------------------------------------
 
