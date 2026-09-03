@@ -1324,7 +1324,8 @@ class SafeCropMask(IO.ComfyNode):
             node_id="SafeCropMask",
             display_name="마스크 크롭",
             category="커스텀마스크/컷팅",
-            description="마스크를 지정된 위치와 크기로 잘라냅니다.",
+            description="마스크를 지정된 위치와 크기로 잘라냅니다.\n"
+                        "원본 이미지를 초과한 값을 넣을 경우 최대 범위에 맞춰 조정합니다.",
             inputs=[
                 IO.Mask.Input("mask", tooltip="잘라낼 원본 마스크 텐서"),
                 IO.Int.Input("x", default=0, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="잘라낼 영역의 X 좌표"),
@@ -1377,13 +1378,14 @@ class SafeCenterCropMask(IO.ComfyNode):
             node_id="SafeCenterCropMask",
             display_name="마스크 중앙 크롭",
             category="커스텀마스크/컷팅",
-            description="마스크를 중앙 기준으로 잘라냅니다.",
+            description="마스크를 중앙 기준으로 잘라냅니다.\n"
+                        "원본 이미지를 초과한 값을 넣을 경우 최대 범위에 맞춰 조정합니다.",
             inputs=[
                 IO.Mask.Input("mask", tooltip="잘라낼 원본 마스크 텐서"),
-                IO.Int.Input("left", default=256, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="중앙 기준 왼쪽으로 잘라낼 픽셀 수"),
-                IO.Int.Input("right", default=256, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="중앙 기준 오른쪽으로 잘라낼 픽셀 수"),
-                IO.Int.Input("top", default=256, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="중앙 기준 위쪽으로 잘라낼 픽셀 수"),
-                IO.Int.Input("bottom", default=256, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="중앙 기준 아래쪽으로 잘라낼 픽셀 수"),
+                IO.Int.Input("left", default=256, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="중앙 기준 왼쪽으로 남길 픽셀 수"),
+                IO.Int.Input("right", default=256, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="중앙 기준 오른쪽으로 남길 픽셀 수"),
+                IO.Int.Input("top", default=256, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="중앙 기준 위쪽으로 남길 픽셀 수"),
+                IO.Int.Input("bottom", default=256, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="중앙 기준 아래쪽으로 남길 픽셀 수"),
                 IO.Boolean.Input("show_preview", default=False, tooltip="프리뷰 표시 여부"),
             ],
             hidden=[IO.Hidden.prompt, IO.Hidden.extra_pnginfo],
@@ -1401,10 +1403,10 @@ class SafeCenterCropMask(IO.ComfyNode):
         b, c, H, W = mask.shape
         cx, cy = W // 2, H // 2
 
-        left = min(max(left, 0), cx-1)
-        right = min(max(right, 0), cx-1)
-        top = min(max(top, 0), cy-1)
-        bottom = min(max(bottom, 0), cy-1)
+        left = min(max(left, 0), cx)
+        right = min(max(right, 0), W - cx)
+        top = min(max(top, 0), cy)
+        bottom = min(max(bottom, 0), H - cy)
 
         cropped = mask[:, :, cy - top: cy + bottom, cx - left: cx + right]
 
