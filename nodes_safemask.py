@@ -788,10 +788,7 @@ class SafeMaskComposite(IO.ComfyNode):
         destination = cls.sanitize_input_mask(destination)
         source      = cls.sanitize_input_mask(source)
 
-        H = min(destination.shape[-2], source.shape[-2])
-        W = min(destination.shape[-1], source.shape[-1])
-        destination = destination[:, :, :H, :W]
-        source      = source[:, :, :H, :W]
+        source = F.interpolate(source, size=destination.shape[-2:], mode="nearest")
 
         spread = min(max(spread, 0), 10)
         kernel_map = {i: (2*i-1) for i in range(1,11)}
@@ -804,36 +801,72 @@ class SafeMaskComposite(IO.ComfyNode):
             destination = destination / (kernel_size * kernel_size)
 
         if operation == "multiply":
-            combined = destination * source
-        elif operation == "add":
-            combined = destination + source
-        elif operation == "subtract":
-            combined = destination - source
-        elif operation == "and":
-            combined = torch.bitwise_and(destination.round().bool(), source.round().bool()).float()
-        elif operation == "or":
-            combined = torch.bitwise_or(destination.round().bool(), source.round().bool()).float()
-        elif operation == "xor":
-            combined = torch.bitwise_xor(destination.round().bool(), source.round().bool()).float()
-        else:
-            combined = source
+            if blend_mode == "normal":
+                output = destination * source
+            elif blend_mode == "overlay":
+                output = torch.where(
+                    destination < 0.5,
+                    2 * destination * source,
+                    1 - 2 * (1 - destination) * (1 - source)
+                )
+            else:
+                print(f"[SafeMaskComposite] The selected blend_mode '{blend_mode}' is  "
+                f"It is not supported in  operation '{operation}'. I will handle it with basic arithmetic.")
+                output = destination * source
 
-        if blend_mode == "soft":
-            output = (destination * 0.5 + source * 0.5)
-        elif blend_mode == "screen":
-            output = 1 - ((1 - destination) * (1 - source))
-        elif blend_mode == "overlay":
-            output = torch.where(
-                destination < 0.5,
-                2 * destination * source,
-                1 - 2 * (1 - destination) * (1 - source)
-            )
-        elif blend_mode == "darken":
-            output = torch.min(destination, source)
-        elif blend_mode == "lighten":
-            output = torch.max(destination, source)
+        elif operation == "add":
+            if blend_mode == "normal":
+                output = destination + source
+            elif blend_mode == "soft":
+                output = (destination * 0.5 + source * 0.5)
+            elif blend_mode == "screen":
+                output = 1 - ((1 - destination) * (1 - source))
+            elif blend_mode == "lighten":
+                output = torch.max(destination, source)
+            else:
+                print(f"[SafeMaskComposite] The selected blend_mode '{blend_mode}' is  "
+                f"It is not supported in  operation '{operation}'. I will handle it with basic arithmetic.")
+                output = destination + source
+
+        elif operation == "subtract":
+            if blend_mode == "normal":
+                pass
+            else:
+                print(f"[SafeMaskComposite] The selected blend_mode '{blend_mode}' is  "
+                f"It is not supported in  operation '{operation}'. I will handle it with basic arithmetic.")
+            output = destination - source
+
+        elif operation == "and":
+            if blend_mode == "normal":
+                pass
+            else:
+                print(f"[SafeMaskComposite] The selected blend_mode '{blend_mode}' is  "
+                f"It is not supported in  operation '{operation}'. I will handle it with basic arithmetic.")
+            output = torch.bitwise_and(destination.round().bool(), source.round().bool()).float()
+
+        elif operation == "or":
+            if blend_mode == "normal":
+                pass
+            else:
+                print(f"[SafeMaskComposite] The selected blend_mode '{blend_mode}' is  "
+                f"It is not supported in  operation '{operation}'. I will handle it with basic arithmetic.")
+            output = torch.bitwise_or(destination.round().bool(), source.round().bool()).float()
+
+        elif operation == "xor":
+            if blend_mode == "normal":
+                pass
+            else:
+                print(f"[SafeMaskComposite] The selected blend_mode '{blend_mode}' is  "
+                f"It is not supported in  operation '{operation}'. I will handle it with basic arithmetic.")
+            output = torch.bitwise_xor(destination.round().bool(), source.round().bool()).float()
+
         else:
-            output = combined
+            if blend_mode == "normal":
+                pass
+            else:
+                print(f"[SafeMaskComposite] The selected blend_mode '{blend_mode}' is  "
+                f"It is not supported in  operation '{operation}'. I will handle it with basic arithmetic.")
+            output = source
 
         output = torch.clamp(output, 0.0, 1.0)
         return IO.NodeOutput(output,)
