@@ -1237,7 +1237,7 @@ class SafeSolidMask(IO.ComfyNode):
         mask = torch.full((1, 1, height, width), value, dtype=torch.float32, device="cpu")
         mask = ensure_mask_output_shape(mask)
 
-        return IO.NodeOutput(mask,)
+        return IO.NodeOutput(mask)
 
 #----------------------------------------------------
 
@@ -1256,7 +1256,7 @@ class SafeImagePadding(IO.ComfyNode):
                 IO.Int.Input("pad_bottom", default=0, min=0, max=2048, step=1, tooltip="아래쪽으로 확장할 픽셀 수"),
                 IO.Int.Input("pad_left", default=0, min=0, max=2048, step=1, tooltip="왼쪽으로 확장할 픽셀 수"),
                 IO.Int.Input("pad_right", default=0, min=0, max=2048, step=1, tooltip="오른쪽으로 확장할 픽셀 수"),
-                IO.Combo.Input("padding_color", options=["black", "white"], default="black", tooltip="패딩 영역에 채울 색상"),
+                IO.Combo.Input("padding_color", options=["black", "white", "neutral_gray"], default="black", tooltip="패딩 영역에 채울 색상"),
             ],
             outputs=[
                 IO.Image.Output("image_out", tooltip="패딩이 적용된 이미지"),
@@ -1273,7 +1273,12 @@ class SafeImagePadding(IO.ComfyNode):
         pad_left = min(max(pad_left, 0), 2048)
         pad_right = min(max(pad_right, 0), 2048)
         b, c, h, w = image_tensor.shape
-        fill_val = 0.0 if padding_color == "black" else 1.0
+        if padding_color == "neutral_gray":
+            fill_val = 0.5  # 0~1 Normalized tensor-based exactly median gray (RGB 128)
+        elif padding_color == "white":
+            fill_val = 1.0
+        else:  # black
+            fill_val = 0.0
 
         canvas = torch.full(
             (b, c, h + pad_top + pad_bottom, w + pad_left + pad_right),
@@ -1541,9 +1546,6 @@ class SafeMaskPreview(IO.ComfyNode):
         return IO.NodeOutput(ui=UI.PreviewMask(mask))
         
 #----------------------------------------------------        
-# Mask Preview - original implement from
-# https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
-# upstream requested in https://github.com/Kosinkadink/rfcs/blob/main/rfcs/0000-corenodes.md#preview-nodes
 
 class SafeMaskSaveOnly(IO.ComfyNode):
 
