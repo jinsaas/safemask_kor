@@ -942,7 +942,6 @@ class SafeMaskAmplifier(IO.ComfyNode):
         return IO.NodeOutput(mask_tensor)
 
 
-
 #----------------------------------------------------
 # Mask Preview - original implement from
 # https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
@@ -1012,6 +1011,7 @@ class AutoMaskGenerator(IO.ComfyNode):
 #----------------------------------------------------
 #Registration
 #----------------------------------------------------
+    
     
 TEST_NODE_CLASS_MAPPINGS = {
     "SafeTileSoftFillng": SafeTileSoftFillng,
