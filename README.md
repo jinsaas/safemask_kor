@@ -52,6 +52,12 @@ It also works with the latest ComfyUI versions.
 
 -saveonly node : add preview option
 
+### V4.1.0
+
+-bug patch
+
+-add image padding node option : neutral gray(128,128,128)
+
 ## Extended Features
 
 - **Safe MaskToImage Node**: Converts a mask into an image (e.g., grayscale visualization).
