@@ -437,7 +437,7 @@ def generate_auto_noise_mask(arr_bgr, threshold_sat, amp_factor, blur_kernel):
     gray = cv2.cvtColor(arr_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
     # sat >=thresh_val : low saturation collapse
-    thresh_val = (threshold_sat / 10.0)
+    thresh_val = (threshold_sat / 10.0) * 255
     sat_low_mask = (hsv[:, :, 1] < thresh_val).astype(np.float32)
     
 
@@ -490,7 +490,7 @@ def generate_auto_mask_min(arr_bgr, threshold_sat, amp_factor, k_size):
     # 3. mean/sq variance
     mean_sq = cv2.blur(gray**2, (k_size, k_size))
     var = np.clip(mean_sq - mean**2, 0, None)
-    mask = cv2.threshold(var, threshold_sat * 2.0, 255, cv2.THRESH_BINARY_INV)[1]
+    mask = cv2.threshold(var, adj_threshold, 255, cv2.THRESH_BINARY_INV)[1]
 
     # 4. amp_factor
     automask = np.clip(mask * (1.0 + amp_factor), 0, 255)
