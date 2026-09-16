@@ -302,8 +302,7 @@ ComfyUI 기본 마스크 노드를 기반으로 하여,
 - **Outputs**:  
   - `mask`: 잘라낸 마스크  
 
-#### Safe CropMargins Mask Node : 안정화노드. 중앙을 기준으로 상하좌우로 직접 자를 픽셀을 지정. 뺄 픽셀만큼을 입력합니다.
-##신규노드
+#### Safe CropMargins Mask Node : 신규노드. 중앙을 기준으로 상하좌우로 직접 자를 픽셀을 지정. 뺄 픽셀만큼을 입력합니다.
 
 - **Inputs**:  
   - `mask`: 마스크 텐서  
