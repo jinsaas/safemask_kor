@@ -29,6 +29,29 @@ import logging
 #--------------------------
 # Header Utility Code(Baseif)
 #--------------------------
+def to_numpy_image(image):
+    if isinstance(image, torch.Tensor):
+        arr = image[0].cpu().numpy()
+        if arr.ndim == 3 and arr.shape[0] == 1:  # (1,H,W) → (H,W)
+            arr = arr[0]
+        elif arr.ndim == 3 and arr.shape[0] == 3:  # (3,H,W) → (H,W,3)
+            arr = np.transpose(arr, (1,2,0))
+        if arr.max() <= 1.0:
+            arr = (arr * 255).clip(0,255).astype(np.uint8)
+        else:
+            arr = arr.astype(np.uint8)
+        return arr
+    elif isinstance(image, Image.Image):
+        return np.array(image.convert("RGB"))
+    elif isinstance(image, np.ndarray):
+        return image.astype(np.uint8)
+    else:
+        raise TypeError("Unsupported image type")
+
+def to_tensor_output(canvas: Image.Image):
+    arr = np.array(canvas).astype(np.float32) / 255.0
+    arr = arr[None, ...]  # add batch
+    return torch.from_numpy(arr)
 
 def normalize_mask_tensor(mask):
 
@@ -393,12 +416,24 @@ sample_path = os.path.join(mask_dir, "sample.png")
 if not os.path.exists(sample_path):
     arr = np.zeros((64,64), dtype=np.uint8)
     Image.fromarray(arr, mode="L").save(sample_path)
+
+def crop_margins(image_tensor, left=0, right=0, top=0, bottom=0):
+    arr = to_numpy_image(image_tensor)
+    pil_img = Image.fromarray(arr)
+    w, h = pil_img.size
+
+    x1 = left
+    y1 = top
+    x2 = w - right
+    y2 = h - bottom
+
+    cropped = pil_img.crop((x1, y1, x2, y2))
+    return to_tensor_output(cropped)
+
 #----------------------------------------------------
 # Mask Node Code(Base)
 #----------------------------------------------------
-# Mask Preview - original implement from
-# https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
-# upstream requested in https://github.com/Kosinkadink/rfcs/blob/main/rfcs/0000-corenodes.md#preview-nodes
+
 class SafeMaskLoader(IO.ComfyNode):
 
     @classmethod
@@ -451,11 +486,12 @@ class SafeMaskLoader(IO.ComfyNode):
             mask = 1.0 - mask
             mask = torch.clamp(mask, 0.0, 1.0)
 
-        mask = ensure_mask_output_shape(mask)
+        mask = ensure_mask_output_shape(mask) # [B, 1, H, W]
         
         if show_preview:
-            preview_mask = mask # [B, 1, H, W]
-            return IO.NodeOutput(mask, ui=UI.PreviewMask(preview_mask))
+            preview_mask = mask.repeat(1,3,1,1) # [B, 3, H, W]
+            result_rgb = preview_mask.permute(0, 2, 3, 1)  # [B, H, W, 3]
+            return IO.NodeOutput(mask,ui=UI.PreviewImage(result_rgb))
         else:
             return IO.NodeOutput(mask, )
 
@@ -629,11 +665,12 @@ class SafeImageColorToMask(IO.ComfyNode):
                        ((B - b_target).abs() < tolerance)
             mask = cond_hex.float()
 
-        mask = ensure_mask_output_shape(mask)
+        mask = ensure_mask_output_shape(mask) # [B, 1, H, W]
         
         if show_preview:
-            preview_mask = mask # [B, 1, H, W]
-            return IO.NodeOutput(mask, ui=UI.PreviewMask(preview_mask))
+            preview_mask = mask.repeat(1,3,1,1) # [B, 3, H, W]
+            result_rgb = preview_mask.permute(0, 2, 3, 1)  # [B, H, W, 3]
+            return IO.NodeOutput(mask,ui=UI.PreviewImage(result_rgb))
         else:
             return IO.NodeOutput(mask, )
 
@@ -1023,9 +1060,6 @@ class SafeInvertMask(IO.ComfyNode):
         return IO.NodeOutput(out,)
 
 #----------------------------------------------------
-# Mask Preview - original implement from
-# https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
-# upstream requested in https://github.com/Kosinkadink/rfcs/blob/main/rfcs/0000-corenodes.md#preview-nodes
 
 class SafeGrowMask(IO.ComfyNode):
 
@@ -1057,19 +1091,18 @@ class SafeGrowMask(IO.ComfyNode):
         expand = min(max(expand, 0), 25)
         if expand > 0:
             mask = dilate_mtensor(mask, kernel_size=3, iterations=expand, tapered_corners=tapered_corners)
+            mask = crop_margins(mask, left=expand, right=expand, top=expand, bottom=expand)
 
         mask = ensure_mask_output_shape(mask)
         
         if show_preview:
-            preview_mask = mask # [B, 1, H, W]
-            return IO.NodeOutput(mask, ui=UI.PreviewMask(preview_mask))
+            preview_mask = mask.repeat(1,3,1,1) # [B, 1, H, W]
+            result_rgb = preview_mask.permute(0, 2, 3, 1)  # [B, H, W, 3]
+            return IO.NodeOutput(mask,ui=UI.PreviewImage(result_rgb))
         else:
             return IO.NodeOutput(mask, )
 
 #----------------------------------------------------
-# Mask Preview - original implement from
-# https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
-# upstream requested in https://github.com/Kosinkadink/rfcs/blob/main/rfcs/0000-corenodes.md#preview-nodes
 
 class SafeShrinkMask(IO.ComfyNode):
 
@@ -1101,19 +1134,18 @@ class SafeShrinkMask(IO.ComfyNode):
         shrink = min(max(shrink, 0), 25)
         if shrink > 0:
             mask = erode_mtensor(mask, kernel_size=3, iterations=shrink, tapered_corners=tapered_corners)
+            mask = crop_margins(mask, left=shrink, right=shrink, top=shrink, bottom=shrink)
 
-        mask = ensure_mask_output_shape(mask)
+        mask = ensure_mask_output_shape(mask) # [B, 1, H, W]
         
         if show_preview:
-            preview_mask = mask # [B, 1, H, W]
-            return IO.NodeOutput(mask, ui=UI.PreviewMask(preview_mask))
+            preview_mask = mask.repeat(1,3,1,1)
+            result_rgb = preview_mask.permute(0, 2, 3, 1)  # [B, H, W, 3]
+            return IO.NodeOutput(mask,ui=UI.PreviewImage(result_rgb))
         else:
             return IO.NodeOutput(mask, )
 
 #----------------------------------------------------
-# Mask Preview - original implement from
-# https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
-# upstream requested in https://github.com/Kosinkadink/rfcs/blob/main/rfcs/0000-corenodes.md#preview-nodes
 
 class SafeTransformMask(IO.ComfyNode):
 
@@ -1159,18 +1191,16 @@ class SafeTransformMask(IO.ComfyNode):
             out.append(torch.from_numpy(resized))
 
         mask_out = torch.stack(out, dim=0)
-        mask = ensure_mask_output_shape(mask_out)
+        mask = ensure_mask_output_shape(mask_out) # [B, 1, H, W]
         
         if show_preview:
-            preview_mask = mask # [B, 1, H, W]
-            return IO.NodeOutput(mask, ui=UI.PreviewMask(preview_mask))
+            preview_mask = mask.repeat(1,3,1,1)
+            result_rgb = preview_mask.permute(0, 2, 3, 1)  # [B, H, W, 3]
+            return IO.NodeOutput(mask,ui=UI.PreviewImage(result_rgb))
         else:
             return IO.NodeOutput(mask, )
 
 #----------------------------------------------------
-# Mask Preview - original implement from
-# https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
-# upstream requested in https://github.com/Kosinkadink/rfcs/blob/main/rfcs/0000-corenodes.md#preview-nodes
 
 class SafeThresholdMask(IO.ComfyNode):
 
@@ -1200,11 +1230,12 @@ class SafeThresholdMask(IO.ComfyNode):
         value = min(max(value, 0.0), 1.0)
         mask = (mask > value).float()
         
-        mask = ensure_mask_output_shape(mask)
+        mask = ensure_mask_output_shape(mask) # [B, 1, H, W]
         
         if show_preview:
-            preview_mask = mask # [B, 1, H, W]
-            return IO.NodeOutput(mask, ui=UI.PreviewMask(preview_mask))
+            preview_mask = mask.repeat(1,3,1,1)
+            result_rgb = preview_mask.permute(0, 2, 3, 1)  # [B, H, W, 3]
+            return IO.NodeOutput(mask,ui=UI.PreviewImage(result_rgb))
         else:
             return IO.NodeOutput(mask, )
 
@@ -1351,9 +1382,7 @@ class SafeMaskPadding(IO.ComfyNode):
 #----------------------------------------------------
 # Mask Node Code(Cuttings)
 #----------------------------------------------------
-# Mask Preview - original implement from
-# https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
-# upstream requested in https://github.com/Kosinkadink/rfcs/blob/main/rfcs/0000-corenodes.md#preview-nodes
+
 class SafeCropMask(IO.ComfyNode):
 
     @classmethod
@@ -1394,19 +1423,16 @@ class SafeCropMask(IO.ComfyNode):
         cropped = mask[:, :, y:y + height, x:x + width]
 
 
-        mask = ensure_mask_output_shape(cropped)
+        mask = ensure_mask_output_shape(cropped) # [B, 1, H, W]
         
         if show_preview:
-            preview_mask = mask # [B, 1, H, W]
-            return IO.NodeOutput(mask, ui=UI.PreviewMask(preview_mask))
+            preview_mask = mask.repeat(1,3,1,1)
+            result_rgb = preview_mask.permute(0, 2, 3, 1)  # [B, H, W, 3]
+            return IO.NodeOutput(mask,ui=UI.PreviewImage(result_rgb))
         else:
             return IO.NodeOutput(mask, )
 
 #----------------------------------------------------
-# Mask Preview - original implement from
-# https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
-# upstream requested in https://github.com/Kosinkadink/rfcs/blob/main/rfcs/0000-corenodes.md#preview-nodes
-
 
 class SafeCenterCropMask(IO.ComfyNode):
 
@@ -1448,18 +1474,117 @@ class SafeCenterCropMask(IO.ComfyNode):
 
         cropped = mask[:, :, cy - top: cy + bottom, cx - left: cx + right]
 
-        mask = ensure_mask_output_shape(cropped)
+        mask = ensure_mask_output_shape(cropped) # [B, 1, H, W]
         
         if show_preview:
-            preview_mask = mask # [B, 1, H, W]
-            return IO.NodeOutput(mask, ui=UI.PreviewMask(preview_mask))
+            preview_mask = mask.repeat(1,3,1,1) # [B, 3, H, W]
+            result_rgb = preview_mask.permute(0, 2, 3, 1)  # [B, H, W, 3]
+            return IO.NodeOutput(mask,ui=UI.PreviewImage(result_rgb))
         else:
             return IO.NodeOutput(mask, )
 
 #----------------------------------------------------
-# Mask Preview - original implement from
-# https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
-# upstream requested in https://github.com/Kosinkadink/rfcs/blob/main/rfcs/0000-corenodes.md#preview-nodes
+
+class SafeCropMarginsMask(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="SafeCropMarginsMask",
+            display_name="마스크 크롭 마진",
+            category="커스텀마스크/컷팅",
+            description="마스크를 중앙 기준으로 잘라냅니다.\n"
+                        "원본 이미지를 초과한 값을 넣을 경우 최대 범위에 맞춰 조정합니다.\n"
+                        "마스크 중앙 크롭과 달리 자를 수치를 입력합니다.",
+            inputs=[
+                IO.Mask.Input("mask", tooltip="잘라낼 원본 마스크 텐서"),
+                IO.Int.Input("left", default=0, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="중앙 기준 왼쪽으로 자를 픽셀 수"),
+                IO.Int.Input("right", default=0, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="중앙 기준 오른쪽으로 자를 픽셀 수"),
+                IO.Int.Input("top", default=0, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="중앙 기준 위쪽으로 자를 픽셀 수"),
+                IO.Int.Input("bottom", default=0, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="중앙 기준 아래쪽으로 자를 픽셀 수"),
+                IO.Boolean.Input("show_preview", default=False, tooltip="프리뷰 표시 여부"),
+            ],
+            hidden=[IO.Hidden.prompt, IO.Hidden.extra_pnginfo],
+            is_output_node=True,
+            outputs=[
+                IO.Mask.Output("mask_out", tooltip="중앙 기준으로 크롭된 마스크"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, mask, left, right, top, bottom, show_preview=False) -> IO.NodeOutput:
+        
+        mask = ensure_mask_tensor(mask)
+
+        b, c, H, W = mask.shape
+        cx, cy = W // 2, H // 2
+
+        max_left = cx
+        max_right = W - cx
+        max_top = cy
+        max_bottom = H - cy
+        
+        left = min(max(left, 0), max_left)
+        top = min(max(top, 0), max_top)
+        right = min(max(right, 0), max_right)
+        bottom = min(max(bottom, 0), max_bottom)
+
+        # Validation
+        if (left + right) >= W:
+            raise ValueError(f"[IRL_CropMargins Error] The sum of the left and right crop values ​​(left: {left}, right: {right}) is greater than or equal to the width (Width: {w}). There is no valid crop area.")
+
+        if (top + bottom) >= H:
+            raise ValueError(f"[IRL_CropMargins Error] The sum of the top and bottom crop values ​​(top: {top}, bottom: {bottom}) is greater than or equal to the height (Height: {h}). There is no valid crop area.")
+        
+        base_left = cx   # The default maximum distance to be applied when equal
+        base_right = W - cx
+        base_top = cy
+        base_bottom = H - cy
+        w_left = base_left - left
+        w_right = base_right - right
+        h_top = base_top - top
+        h_bottom = base_bottom - bottom
+
+        if w_left + w_right > W:
+            print(f"[IRL_CropMargins] Warning: The sum of left({left}) + right({right}) is already greater than the image width ({w}). Adjust the crop area.")
+            # A safety mechanism to reduce to the appropriate ratio or to leave only the minimal area (1 pixel) visible
+            scale = (W - 1) / (w_left + w_right) if (w_left + w_right) > 0 else 1
+            wi_left = int(w_left * scale)
+            w_right = W - 1 - wi_left
+            w_left = wi_left
+        elif w_left < 0 or w_right < 0:
+            raise ValueError(f"[IRL_CropMargins] The left-right crop value (left: {left}, right: {right}) was too large and exceeded the valid crop region. (Result: negative occurrence)")
+        else:
+            pass
+
+        if h_top + h_bottom > H:
+            print(f"[IRL_CropMargins] Warning: The sum of top({top}) and bottom({bottom}) is at least the image height({h}). Adjust the crop area.")
+            scale = (H - 1) / (h_top + h_bottom) if (h_top + h_bottom) > 0 else 1
+            he_top = int(h_top * scale)
+            h_bottom = H - 1 - he_top
+            h_top = he_top
+        elif h_top < 0 or h_bottom < 0:
+            raise ValueError(f"[IRL_CropMargins] The top and bottom crop values (top: {top}, bottom: {bottom}) were too large and exceeded the valid crop region. (Result: negative occurrence)")
+        else:
+            pass
+            
+        x1 = max(cx - w_left, 0) 
+        y1 = max(cy - h_top, 0)
+        x2 = min(cx + w_right, W)
+        y2 = min(cy + h_bottom, H)
+
+        cropped = mask[:, :, y1:y2, x1:x2]
+
+        mask = ensure_mask_output_shape(cropped) # [B, 1, H, W]
+        
+        if show_preview:
+            preview_mask = mask.repeat(1,3,1,1) # [B, 3, H, W]
+            result_rgb = preview_mask.permute(0, 2, 3, 1)  # [B, H, W, 3]
+            return IO.NodeOutput(mask,ui=UI.PreviewImage(result_rgb))
+        else:
+            return IO.NodeOutput(mask, )
+
+#----------------------------------------------------
 
 class SafeFeatherMask(IO.ComfyNode):
 
@@ -1494,11 +1619,12 @@ class SafeFeatherMask(IO.ComfyNode):
         
         output = apply_feathering(mask, feather_size, feather_strength)
 
-        mask = ensure_mask_output_shape(output)
+        mask = ensure_mask_output_shape(output) # [B, 1, H, W]
         
         if show_preview:
-            preview_mask = mask # [B, 1, H, W]
-            return IO.NodeOutput(mask, ui=UI.PreviewMask(preview_mask))
+            preview_mask = mask.repeat(1,3,1,1) # [B, 3, H, W]
+            result_rgb = preview_mask.permute(0, 2, 3, 1)  # [B, H, W, 3]
+            return IO.NodeOutput(mask,ui=UI.PreviewImage(result_rgb))
         else:
             return IO.NodeOutput(mask, )
 
@@ -1582,16 +1708,15 @@ class SafeMaskSaveOnly(IO.ComfyNode):
 
         imageio.imwrite(filepath, (mask_img * 255).astype("uint8"))
 
-        mask = ensure_mask_output_shape(mask_tensor)
+        mask = ensure_mask_output_shape(mask_tensor) # [B, 1, H, W]
+
         if show_preview:
-            preview_mask = mask # [B, 1, H, W]
-            return IO.NodeOutput(ui=UI.PreviewMask(preview_mask))
+            preview_mask = mask.repeat(1,3,1,1) # [B, 3, H, W]
+            result_rgb = preview_mask.permute(0, 2, 3, 1)  # [B, H, W, 3]
+            return IO.NodeOutput(mask,ui=UI.PreviewImage(result_rgb))
         return IO.NodeOutput()
 
 #----------------------------------------------------
-# Mask Preview - original implement from
-# https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
-# upstream requested in https://github.com/Kosinkadink/rfcs/blob/main/rfcs/0000-corenodes.md#preview-nodes
 
 class SafeMaskSaveLink(IO.ComfyNode):
 
@@ -1632,11 +1757,12 @@ class SafeMaskSaveLink(IO.ComfyNode):
 
             imageio.imwrite(filepath, (mask_img * 255).astype("uint8"))
             
-        mask = ensure_mask_output_shape(mask_tensor)
+        mask = ensure_mask_output_shape(mask_tensor) # [B, 1, H, W]
 
         if show_preview:
-            preview_mask = mask # [B, 1, H, W]
-            return IO.NodeOutput(mask, ui=UI.PreviewMask(preview_mask))
+            preview_mask = mask.repeat(1,3,1,1) # [B, 3, H, W]
+            result_rgb = preview_mask.permute(0, 2, 3, 1)  # [B, H, W, 3]
+            return IO.NodeOutput(mask,ui=UI.PreviewImage(result_rgb))
         else:
             return IO.NodeOutput(mask, )
 
@@ -1828,6 +1954,7 @@ Safemask_NODE_CLASS_MAPPINGS = {
     "SafeMaskPadding": SafeMaskPadding,
     "SafeCropMask": SafeCropMask,
     "SafeCenterCropMask": SafeCenterCropMask,
+    "SafeCropMarginsMask": SafeCropMarginsMask,
     "SafeFeatherMask": SafeFeatherMask,
     "SafeMaskPreview": SafeMaskPreview,
     "SafeMaskSaveOnly": SafeMaskSaveOnly,
@@ -1854,6 +1981,7 @@ Safemask_NODE_DISPLAY_NAME_MAPPINGS = {
     "SafeMaskPadding": "마스크 패딩",
     "SafeCropMask": "안정화 마스크자르기",
     "SafeCenterCropMask": "안정화 선택마스크자르기",
+    "SafeCropMarginsMask": "마스크 크롭 마진",
     "SafeFeatherMask": "안정화 마스크페더링",
     "SafeMaskPreview": "안정화 마스크미리보기",
     "SafeMaskSaveOnly": "안정화 마스크 저장",
