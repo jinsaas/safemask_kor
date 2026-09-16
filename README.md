@@ -58,6 +58,13 @@ It also works with the latest ComfyUI versions.
 
 -add image padding node option : neutral gray(128,128,128)
 
+### V4.1.2
+-Tapered Corner bug patch
+
+-Changed the preview logic to be based on image previews.
+
+-Added a Crop Margin Mask node. It crops the outer edges by a specified number of pixels, using the center as the axis.
+
 ## Extended Features
 
 - **Safe MaskToImage Node**: Converts a mask into an image (e.g., grayscale visualization).
@@ -266,8 +273,17 @@ Stabilization node. Default crop origin is top‑left. Includes built‑in previ
 - **Outputs**:
   - `mask`: Cropped mask
 
-#### Safe Select CropMask Node
+#### Safe CenterCrop Mask Node
 Stabilization node. Crops mask relative to center by specifying pixels for left, right, top, bottom. Includes built‑in preview.
+- **Inputs**:
+  - `mask`: Mask tensor
+  - `L`, `R`, `T`, `B`: Crop values
+  - `show_preview`: Preview option
+- **Outputs**:
+  - `mask`: Cropped mask
+
+####  Safe CropMargins Mask Node
+New node. Specify the pixels to be directly cut from the center—up, down, left, and right. Enter the number of pixels to remove.
 - **Inputs**:
   - `mask`: Mask tensor
   - `L`, `R`, `T`, `B`: Crop values
