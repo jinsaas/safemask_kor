@@ -943,9 +943,6 @@ class SafeMaskAmplifier(IO.ComfyNode):
 
 
 #----------------------------------------------------
-# Mask Preview - original implement from
-# https://github.com/cubiq/ComfyUI_essentials/blob/9d9f4bedfc9f0321c19faf71855e228c93bd0dc9/mask.py#L81
-# upstream requested in https://github.com/Kosinkadink/rfcs/blob/main/rfcs/0000-corenodes.md#preview-nodes
 
 class AutoMaskGenerator(IO.ComfyNode):
     @classmethod
@@ -1000,11 +997,12 @@ class AutoMaskGenerator(IO.ComfyNode):
             mask_arr = generate_auto_mask_min(arr_bgr, threshold_sat, amp_factor, k_size)
 
         mask_tensor = torch.from_numpy(mask_arr).float() / 255.0
-        mask_tensor = ensure_mask_output_shape(mask_tensor)
+        mask_tensor = ensure_mask_output_shape(mask_tensor) # [B, 1, H, W]
         
         if show_preview:
-            preview_mask = mask_tensor # [B, 1, H, W]
-            return IO.NodeOutput(mask_tensor, ui=UI.PreviewMask(preview_mask))
+            preview_mask = mask_tensor.repeat(1,3,1,1) # [B, 3, H, W]
+            result_rgb = preview_mask.permute(0, 2, 3, 1)  # [B, H, W, 3]
+            return IO.NodeOutput(mask_tensor,ui=UI.PreviewImage(result_rgb))
         else:
             return IO.NodeOutput(mask_tensor, )
 
